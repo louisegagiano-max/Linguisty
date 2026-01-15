@@ -95,7 +95,7 @@ const App: React.FC = () => {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
       
-      // Step 1: Translate text using Gemini 3 Flash
+      // Step 1: Translate text using Gemini 3 Flash to ensure the TTS speaks the correct target language
       const translateResponse = await ai.models.generateContent({
         model: TRANSLATION_MODEL,
         contents: `Translate the following text to ${targetLang.name} (${targetLang.nativeName}). Return ONLY the translated text: "${textToSpeak}"`,
@@ -127,7 +127,7 @@ const App: React.FC = () => {
       setManualText('');
     } catch (err) {
       console.error(err);
-      setError('Translation or Speech failed. Please check connection.');
+      setError('Translation or Speech failed. Check your API key and connection.');
     } finally {
       setIsProcessingTTS(false);
     }
@@ -235,14 +235,14 @@ const App: React.FC = () => {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
           },
-          systemInstruction: `SYSTEM: HD-CLARITY SIMULTANEOUS INTERPRETER.
-          MISSION: TRANSLATE AUDIO AND SPEAK IT BACK IMMEDIATELY.
+          systemInstruction: `SYSTEM: Simultaneous Translator.
+          MISSION: Translate spoken audio into ${targetLang.name} (${targetLang.nativeName}) immediately.
           
-          PROCESSING RULES:
-          1. Aggressive streaming translation.
-          2. AUDIO OUTPUT IS TRANSLATION ONLY.
-          3. NO PREAMBLE. Target Language: ${targetLang.name} (${targetLang.code}).
-          4. Optimized for phonetic clarity.`
+          RULES:
+          1. Provide ONLY the translation as audio output.
+          2. Maintain high fidelity and phonetic accuracy.
+          3. Detect the source language automatically.
+          4. Output format: [Detected Language] Translation text.`
         }
       });
 
@@ -265,7 +265,7 @@ const App: React.FC = () => {
         </div>
         {isListening && (
           <div className="bg-blue-500/20 text-blue-400 text-[9px] px-3 py-1 rounded-full font-black animate-fade-in border border-blue-500/30 tracking-widest uppercase">
-            Live Stream Mode
+            Live High-Fidelity Path
           </div>
         )}
       </header>
@@ -291,13 +291,12 @@ const App: React.FC = () => {
           <TranscriptionList entries={transcriptions} onReplay={handleManualTTS} />
         </div>
 
-        {/* Improved Text-to-Speech Translation Box */}
         {!isListening && (
           <div className="w-full bg-white/5 p-4 rounded-3xl border border-white/10 flex flex-col gap-2 transition-all duration-500">
             <div className="flex gap-2">
               <input
                 type="text"
-                placeholder={`Type to translate into ${targetLang.name}...`}
+                placeholder={`Translate into ${targetLang.name}...`}
                 value={manualText}
                 onChange={(e) => setManualText(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleManualTTS(manualText)}
@@ -349,7 +348,7 @@ const App: React.FC = () => {
                 ))}
               </div>
             ) : (
-              <i className="fa-solid fa-microphone text-3xl"></i>
+              <i className="fa-solid fa-microphone text-3xl text-white"></i>
             )}
           </button>
           
@@ -360,7 +359,7 @@ const App: React.FC = () => {
       </main>
 
       <footer className="p-3 text-center text-[10px] text-gray-700 font-black uppercase tracking-[0.3em] bg-black/80">
-        Engine: Gemini 3 Flash • Translation + TTS Enabled
+        Audio: HD Stream • Real-time Build System Active
       </footer>
     </div>
   );
