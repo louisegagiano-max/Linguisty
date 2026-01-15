@@ -10,6 +10,7 @@ const SAMPLE_RATE_IN = 16000;
 const SAMPLE_RATE_OUT = 24000;
 const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
 const TTS_MODEL = 'gemini-2.5-flash-preview-tts';
+const TRANSLATION_MODEL = 'gemini-3-flash-preview';
 const INPUT_BUFFER_SIZE = 2048;
 
 const App: React.FC = () => {
@@ -87,15 +88,24 @@ const App: React.FC = () => {
     sourcesRef.current.add(source);
   };
 
-  const handleManualTTS = async (text: string) => {
-    if (!text.trim() || isProcessingTTS) return;
+  const handleManualTTS = async (textToSpeak: string) => {
+    if (!textToSpeak.trim() || isProcessingTTS) return;
     setIsProcessingTTS(true);
     setError(null);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-      const response = await ai.models.generateContent({
+      
+      // Step 1: Translate text using Gemini 3 Flash
+      const translateResponse = await ai.models.generateContent({
+        model: TRANSLATION_MODEL,
+        contents: `Translate the following text to ${targetLang.name} (${targetLang.nativeName}). Return ONLY the translated text: "${textToSpeak}"`,
+      });
+      const translatedText = translateResponse.text?.trim() || textToSpeak;
+
+      // Step 2: Speak the translated text using Gemini 2.5 TTS
+      const ttsResponse = await ai.models.generateContent({
         model: TTS_MODEL,
-        contents: [{ parts: [{ text: `Speak this text clearly in ${targetLang.name}: ${text}` }] }],
+        contents: [{ parts: [{ text: translatedText }] }],
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
@@ -104,20 +114,20 @@ const App: React.FC = () => {
         },
       });
 
-      const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      const audioData = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (audioData) {
         await playAudioBytes(audioData);
         setTranscriptions(prev => [...prev, {
           id: `tts-${Date.now()}`,
           speaker: 'model',
-          text: `[TTS Output]: ${text}`,
+          text: `"${textToSpeak}" \u2192 ${translatedText}`,
           timestamp: Date.now()
         }]);
       }
       setManualText('');
     } catch (err) {
       console.error(err);
-      setError('TTS failed. Try again.');
+      setError('Translation or Speech failed. Please check connection.');
     } finally {
       setIsProcessingTTS(false);
     }
@@ -232,7 +242,7 @@ const App: React.FC = () => {
           1. Aggressive streaming translation.
           2. AUDIO OUTPUT IS TRANSLATION ONLY.
           3. NO PREAMBLE. Target Language: ${targetLang.name} (${targetLang.code}).
-          4. Optimized for phonetic clarity in South African languages.`
+          4. Optimized for phonetic clarity.`
         }
       });
 
@@ -255,7 +265,7 @@ const App: React.FC = () => {
         </div>
         {isListening && (
           <div className="bg-blue-500/20 text-blue-400 text-[9px] px-3 py-1 rounded-full font-black animate-fade-in border border-blue-500/30 tracking-widest uppercase">
-            Live High-Fidelity Path
+            Live Stream Mode
           </div>
         )}
       </header>
@@ -281,13 +291,13 @@ const App: React.FC = () => {
           <TranscriptionList entries={transcriptions} onReplay={handleManualTTS} />
         </div>
 
-        {/* Text-to-Speech Translation Box */}
+        {/* Improved Text-to-Speech Translation Box */}
         {!isListening && (
           <div className="w-full bg-white/5 p-4 rounded-3xl border border-white/10 flex flex-col gap-2 transition-all duration-500">
             <div className="flex gap-2">
               <input
                 type="text"
-                placeholder="Type to translate & speak..."
+                placeholder={`Type to translate into ${targetLang.name}...`}
                 value={manualText}
                 onChange={(e) => setManualText(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleManualTTS(manualText)}
@@ -296,15 +306,12 @@ const App: React.FC = () => {
               <button
                 onClick={() => handleManualTTS(manualText)}
                 disabled={!manualText.trim() || isProcessingTTS}
-                className="bg-blue-600 hover:bg-blue-500 disabled:opacity-30 p-3 rounded-2xl transition-all shadow-lg"
+                className="bg-blue-600 hover:bg-blue-500 disabled:opacity-30 p-3 rounded-2xl transition-all shadow-lg flex items-center justify-center min-w-[3.5rem]"
               >
                 {isProcessingTTS ? (
                   <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 ) : (
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M11 5L6 9H2V15H6L11 19V5Z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07" />
-                  </svg>
+                  <i className="fa-solid fa-paper-plane text-white"></i>
                 )}
               </button>
             </div>
@@ -342,9 +349,7 @@ const App: React.FC = () => {
                 ))}
               </div>
             ) : (
-              <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-              </svg>
+              <i className="fa-solid fa-microphone text-3xl"></i>
             )}
           </button>
           
@@ -355,7 +360,7 @@ const App: React.FC = () => {
       </main>
 
       <footer className="p-3 text-center text-[10px] text-gray-700 font-black uppercase tracking-[0.3em] bg-black/80">
-        Audio: HD Stream • Text-to-Speech Active
+        Engine: Gemini 3 Flash • Translation + TTS Enabled
       </footer>
     </div>
   );
