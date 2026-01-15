@@ -8,7 +8,8 @@ import { TranscriptionList } from './components/TranscriptionList';
 
 const SAMPLE_RATE_IN = 16000;
 const SAMPLE_RATE_OUT = 24000;
-const MODEL_NAME = 'gemini-2.5-flash-native-audio-preview-12-2025';
+const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
+const TTS_MODEL = 'gemini-2.5-flash-preview-tts';
 const INPUT_BUFFER_SIZE = 2048;
 
 const App: React.FC = () => {
@@ -18,6 +19,8 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [detectedLanguage, setDetectedLanguage] = useState<string | null>(null);
   const [volume, setVolume] = useState(0);
+  const [manualText, setManualText] = useState('');
+  const [isProcessingTTS, setIsProcessingTTS] = useState(false);
 
   const audioContextInRef = useRef<AudioContext | null>(null);
   const audioContextOutRef = useRef<AudioContext | null>(null);
@@ -66,13 +69,66 @@ const App: React.FC = () => {
     setDetectedLanguage(null);
   }, []);
 
+  const playAudioBytes = async (base64Audio: string) => {
+    if (!audioContextOutRef.current) {
+      audioContextOutRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: SAMPLE_RATE_OUT });
+    }
+    const ctx = audioContextOutRef.current;
+    if (ctx.state === 'suspended') await ctx.resume();
+    
+    nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
+    const audioBuffer = await decodeAudioData(decode(base64Audio), ctx, SAMPLE_RATE_OUT, 1);
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(ctx.destination);
+    source.onended = () => sourcesRef.current.delete(source);
+    source.start(nextStartTimeRef.current);
+    nextStartTimeRef.current += audioBuffer.duration;
+    sourcesRef.current.add(source);
+  };
+
+  const handleManualTTS = async (text: string) => {
+    if (!text.trim() || isProcessingTTS) return;
+    setIsProcessingTTS(true);
+    setError(null);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+      const response = await ai.models.generateContent({
+        model: TTS_MODEL,
+        contents: [{ parts: [{ text: `Speak this text clearly in ${targetLang.name}: ${text}` }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
+          },
+        },
+      });
+
+      const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (audioData) {
+        await playAudioBytes(audioData);
+        setTranscriptions(prev => [...prev, {
+          id: `tts-${Date.now()}`,
+          speaker: 'model',
+          text: `[TTS Output]: ${text}`,
+          timestamp: Date.now()
+        }]);
+      }
+      setManualText('');
+    } catch (err) {
+      console.error(err);
+      setError('TTS failed. Try again.');
+    } finally {
+      setIsProcessingTTS(false);
+    }
+  };
+
   const startSession = async () => {
     try {
       setError(null);
       setDetectedLanguage('Detecting...');
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
       
-      // Enhanced microphone constraints for clarity
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: { 
           echoCancellation: true, 
@@ -90,19 +146,16 @@ const App: React.FC = () => {
       analyserRef.current = audioContextInRef.current.createAnalyser();
       analyserRef.current.fftSize = 256;
 
-      // Input filter chain: High-pass filter to remove low-frequency hum
       const highPassFilter = audioContextInRef.current.createBiquadFilter();
       highPassFilter.type = 'highpass';
-      highPassFilter.frequency.value = 100; // Remove sub-100Hz noise
+      highPassFilter.frequency.value = 100;
 
       const sessionPromise = ai.live.connect({
-        model: MODEL_NAME,
+        model: LIVE_MODEL,
         callbacks: {
           onopen: () => {
             if (!audioContextInRef.current) return;
             const source = audioContextInRef.current.createMediaStreamSource(stream);
-            
-            // Connect chain: source -> filter -> analyser & scriptProcessor
             source.connect(highPassFilter);
             highPassFilter.connect(analyserRef.current!);
             
@@ -122,17 +175,8 @@ const App: React.FC = () => {
           },
           onmessage: async (message: LiveServerMessage) => {
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-            if (base64Audio && audioContextOutRef.current) {
-              const ctx = audioContextOutRef.current;
-              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-              const audioBuffer = await decodeAudioData(decode(base64Audio), ctx, SAMPLE_RATE_OUT, 1);
-              const source = ctx.createBufferSource();
-              source.buffer = audioBuffer;
-              source.connect(ctx.destination);
-              source.onended = () => sourcesRef.current.delete(source);
-              source.start(nextStartTimeRef.current);
-              nextStartTimeRef.current += audioBuffer.duration;
-              sourcesRef.current.add(source);
+            if (base64Audio) {
+              await playAudioBytes(base64Audio);
             }
 
             if (message.serverContent?.inputTranscription) {
@@ -182,21 +226,19 @@ const App: React.FC = () => {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
           },
           systemInstruction: `SYSTEM: HD-CLARITY SIMULTANEOUS INTERPRETER.
-          MISSION: TRANSLATE AUDIO WITH HIGH FIDELITY AND MINIMAL LAG.
+          MISSION: TRANSLATE AUDIO AND SPEAK IT BACK IMMEDIATELY.
           
           PROCESSING RULES:
-          1. Use aggressive streaming translation (interpret as speech arrives).
-          2. AUDIO OUTPUT MUST BE CLEAN: Translated speech only.
-          3. NO REPETITION of input. NO FILLERS.
-          4. Target Language: ${targetLang.name} (${targetLang.code}).
-          5. Optimized for distinct phonetic clarity in South African and European languages.
-          6. Ignore background noise or overlapping conversation; focus on primary speaker.`
+          1. Aggressive streaming translation.
+          2. AUDIO OUTPUT IS TRANSLATION ONLY.
+          3. NO PREAMBLE. Target Language: ${targetLang.name} (${targetLang.code}).
+          4. Optimized for phonetic clarity in South African languages.`
         }
       });
 
       sessionRef.current = await sessionPromise;
     } catch (err) {
-      setError('Check microphone permissions.');
+      setError('Microphone access denied or connection failed.');
     }
   };
 
@@ -204,42 +246,76 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen max-w-2xl mx-auto overflow-hidden bg-black text-white">
-      <header className="pt-4 pb-2 px-6 flex flex-col items-center">
+      <header className="pt-6 pb-2 px-6 flex flex-col items-center">
         <div className="flex items-center gap-2 mb-1">
-          <div className={`w-2 h-2 rounded-full ${isListening ? 'bg-red-500 animate-pulse' : 'bg-gray-600'}`} />
-          <h1 className="text-xl font-black tracking-widest text-white uppercase">
+          <div className={`w-2.5 h-2.5 rounded-full ${isListening ? 'bg-red-500 animate-pulse' : 'bg-gray-600'}`} />
+          <h1 className="text-2xl font-black tracking-widest text-white uppercase">
             Linguist <span className="text-blue-500">Live</span>
           </h1>
         </div>
         {isListening && (
-          <div className="bg-blue-500/20 text-blue-400 text-[9px] px-2 py-0.5 rounded-full font-bold animate-fade-in border border-blue-500/30 tracking-tighter uppercase">
-            High-Fidelity Stream
+          <div className="bg-blue-500/20 text-blue-400 text-[9px] px-3 py-1 rounded-full font-black animate-fade-in border border-blue-500/30 tracking-widest uppercase">
+            Live High-Fidelity Path
           </div>
         )}
       </header>
 
-      <main className="flex-1 flex flex-col items-center justify-between px-6 pb-8 gap-4 overflow-hidden">
-        <div className="w-full bg-white/5 backdrop-blur-md p-4 rounded-3xl flex flex-col gap-3 border border-white/10 shadow-2xl">
+      <main className="flex-1 flex flex-col items-center justify-between px-6 pb-4 gap-4 overflow-hidden">
+        <div className="w-full bg-white/5 backdrop-blur-xl p-5 rounded-3xl flex flex-col gap-4 border border-white/10 shadow-2xl">
           <LanguageSelector selectedLanguage={targetLang} onSelect={setTargetLang} disabled={isListening} />
           
           {isListening && (
-            <div className="flex justify-between items-center pt-2 border-t border-white/5">
-              <span className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">Detected Source:</span>
-              <span className="text-xs text-blue-400 font-semibold">{detectedLanguage || 'Analyzing...'}</span>
+            <div className="flex justify-between items-center pt-3 border-t border-white/5">
+              <span className="text-[10px] text-gray-500 uppercase tracking-widest font-black">Source:</span>
+              <span className="text-xs text-blue-400 font-bold tracking-wide">{detectedLanguage || 'Listening...'}</span>
             </div>
           )}
         </div>
 
-        <div className="flex-[4] w-full bg-white/5 backdrop-blur-md rounded-3xl overflow-hidden flex flex-col shadow-inner border border-white/10">
-          {error && <div className="p-3 m-4 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-[11px] font-bold">{error}</div>}
-          <TranscriptionList entries={transcriptions} />
+        <div className="flex-[5] w-full bg-white/5 backdrop-blur-md rounded-3xl overflow-hidden flex flex-col shadow-inner border border-white/10 relative">
+          {error && (
+            <div className="absolute top-4 left-4 right-4 z-10 p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-[11px] font-bold text-center">
+              {error}
+            </div>
+          )}
+          <TranscriptionList entries={transcriptions} onReplay={handleManualTTS} />
         </div>
+
+        {/* Text-to-Speech Translation Box */}
+        {!isListening && (
+          <div className="w-full bg-white/5 p-4 rounded-3xl border border-white/10 flex flex-col gap-2 transition-all duration-500">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                placeholder="Type to translate & speak..."
+                value={manualText}
+                onChange={(e) => setManualText(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleManualTTS(manualText)}
+                className="flex-1 bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-600 transition-all"
+              />
+              <button
+                onClick={() => handleManualTTS(manualText)}
+                disabled={!manualText.trim() || isProcessingTTS}
+                className="bg-blue-600 hover:bg-blue-500 disabled:opacity-30 p-3 rounded-2xl transition-all shadow-lg"
+              >
+                {isProcessingTTS ? (
+                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M11 5L6 9H2V15H6L11 19V5Z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07" />
+                  </svg>
+                )}
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="relative flex flex-col items-center justify-center pt-2">
           {isListening && (
             <div 
               className="absolute w-28 h-28 rounded-full border border-blue-500/30 transition-transform duration-75"
-              style={{ transform: `scale(${1 + (volume / 70)})`, opacity: 0.5 - (volume / 140) }}
+              style={{ transform: `scale(${1 + (volume / 60)})`, opacity: 0.5 - (volume / 120) }}
             />
           )}
           
@@ -247,8 +323,8 @@ const App: React.FC = () => {
             onClick={toggleListening}
             className={`z-10 relative w-20 h-20 rounded-full flex items-center justify-center transition-all duration-300 ${
               isListening 
-                ? 'bg-red-600 shadow-[0_0_50px_rgba(220,38,38,0.5)]' 
-                : 'bg-blue-600 hover:bg-blue-500 shadow-[0_0_40px_rgba(37,99,235,0.4)]'
+                ? 'bg-red-600 shadow-[0_0_60px_rgba(220,38,38,0.5)]' 
+                : 'bg-blue-600 hover:bg-blue-500 shadow-[0_0_50px_rgba(37,99,235,0.4)]'
             }`}
           >
             {isListening ? (
@@ -256,9 +332,9 @@ const App: React.FC = () => {
                 {[1, 2, 3, 4, 5].map(i => (
                   <div 
                     key={i} 
-                    className="w-1 bg-white rounded-full animate-bounce" 
+                    className="w-1.5 bg-white rounded-full animate-bounce" 
                     style={{ 
-                      height: `${25 + (volume * Math.random())}%`,
+                      height: `${30 + (volume * Math.random())}%`,
                       animationDelay: `${i * 0.08}s`,
                       animationDuration: '0.4s'
                     }} 
@@ -272,14 +348,14 @@ const App: React.FC = () => {
             )}
           </button>
           
-          <p className="mt-3 text-[10px] font-black tracking-[0.4em] text-gray-500 uppercase">
-            {isListening ? 'Interpreting' : 'Start Session'}
+          <p className="mt-4 text-[11px] font-black tracking-[0.5em] text-gray-500 uppercase">
+            {isListening ? 'Streaming' : 'Tap for Live'}
           </p>
         </div>
       </main>
 
-      <footer className="p-2 text-center text-[9px] text-gray-700 font-bold uppercase tracking-[0.2em] bg-black/50">
-        Audio: HD Path • Echo Cancellation Active
+      <footer className="p-3 text-center text-[10px] text-gray-700 font-black uppercase tracking-[0.3em] bg-black/80">
+        Audio: HD Stream • Text-to-Speech Active
       </footer>
     </div>
   );
