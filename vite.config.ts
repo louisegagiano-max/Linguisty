@@ -13,6 +13,6 @@ export default defineConfig({
     assetsDir: 'assets',
     emptyOutDir: true,
     sourcemap: false,
-    minify: 'terser', // High quality minification
+    // Using default minifier (esbuild) to avoid terser dependency issues
   }
 });
