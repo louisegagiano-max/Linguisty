@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { GoogleGenAI, Modality, LiveServerMessage } from '@google/genai';
 import { SUPPORTED_LANGUAGES, TranscriptionEntry, Language } from './types';
@@ -10,18 +9,21 @@ const SAMPLE_RATE_IN = 16000;
 const SAMPLE_RATE_OUT = 24000;
 const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
 const TTS_MODEL = 'gemini-2.5-flash-preview-tts';
-const TRANSLATION_MODEL = 'gemini-3-flash-preview';
+const TRANSLATE_MODEL = 'gemini-3-flash-preview';
 const INPUT_BUFFER_SIZE = 2048;
 
 const App: React.FC = () => {
   const [isListening, setIsListening] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [targetLang, setTargetLang] = useState<Language>(SUPPORTED_LANGUAGES[0]);
   const [transcriptions, setTranscriptions] = useState<TranscriptionEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [detectedLanguage, setDetectedLanguage] = useState<string | null>(null);
   const [volume, setVolume] = useState(0);
+  const [history, setHistory] = useState<TranscriptionEntry[]>([]);
+  const [isReplaying, setIsReplaying] = useState(false);
   const [manualText, setManualText] = useState('');
-  const [isProcessingTTS, setIsProcessingTTS] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
 
   const audioContextInRef = useRef<AudioContext | null>(null);
   const audioContextOutRef = useRef<AudioContext | null>(null);
@@ -33,6 +35,25 @@ const App: React.FC = () => {
   const sessionRef = useRef<any>(null);
   const animationFrameRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+
+  useEffect(() => {
+    const saved = localStorage.getItem('lingo-history-v2');
+    if (saved) {
+      try {
+        setHistory(JSON.parse(saved));
+      } catch (e) {
+        console.error("Failed to load history", e);
+      }
+    }
+  }, []);
+
+  const saveToHistory = useCallback((entry: TranscriptionEntry) => {
+    setHistory(prev => {
+      const updated = [entry, ...prev].slice(0, 15);
+      localStorage.setItem('lingo-history-v2', JSON.stringify(updated));
+      return updated;
+    });
+  }, []);
 
   const updateVisuals = () => {
     if (analyserRef.current && isListening) {
@@ -67,10 +88,9 @@ const App: React.FC = () => {
     sourcesRef.current.clear();
     setIsListening(false);
     setVolume(0);
-    setDetectedLanguage(null);
   }, []);
 
-  const playAudioBytes = async (base64Audio: string) => {
+  const playAudioBytes = async (base64Audio: string, isManualReplay = false) => {
     if (!audioContextOutRef.current) {
       audioContextOutRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: SAMPLE_RATE_OUT });
     }
@@ -82,71 +102,117 @@ const App: React.FC = () => {
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(ctx.destination);
-    source.onended = () => sourcesRef.current.delete(source);
+    source.onended = () => {
+      sourcesRef.current.delete(source);
+      if (isManualReplay && sourcesRef.current.size === 0) setIsReplaying(false);
+    };
     source.start(nextStartTimeRef.current);
     nextStartTimeRef.current += audioBuffer.duration;
     sourcesRef.current.add(source);
   };
 
-  const handleManualTTS = async (textToSpeak: string) => {
-    if (!textToSpeak.trim() || isProcessingTTS) return;
-    setIsProcessingTTS(true);
-    setError(null);
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-      
-      // Step 1: Translate text using Gemini 3 Flash to ensure the TTS speaks the correct target language
-      const translateResponse = await ai.models.generateContent({
-        model: TRANSLATION_MODEL,
-        contents: `Translate the following text to ${targetLang.name} (${targetLang.nativeName}). Return ONLY the translated text: "${textToSpeak}"`,
-      });
-      const translatedText = translateResponse.text?.trim() || textToSpeak;
+  const handleManualTranslate = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!manualText.trim() || isTranslating) return;
 
-      // Step 2: Speak the translated text using Gemini 2.5 TTS
+    const originalText = manualText;
+    setManualText('');
+    setIsTranslating(true);
+    setError(null);
+
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      
+      // Step 1: Use gemini-3-flash-preview for the translation logic
+      const translationResponse = await ai.models.generateContent({
+        model: TRANSLATE_MODEL,
+        contents: `Translate the following to ${targetLang.name}. Only return the translation, no explanation: "${originalText}"`,
+      });
+      const translatedText = translationResponse.text?.trim() || "";
+      
+      if (!translatedText) throw new Error("Translation failed.");
+
+      // Step 2: Use gemini-2.5-flash-preview-tts for speech synthesis only
       const ttsResponse = await ai.models.generateContent({
         model: TTS_MODEL,
-        contents: [{ parts: [{ text: translatedText }] }],
+        contents: [{ 
+          parts: [{ 
+            text: `Say: ${translatedText}` 
+          }] 
+        }],
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: 'Kore' },
+            },
           },
         },
       });
 
-      const audioData = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (audioData) {
-        await playAudioBytes(audioData);
-        setTranscriptions(prev => [...prev, {
-          id: `tts-${Date.now()}`,
-          speaker: 'model',
-          text: `"${textToSpeak}" \u2192 ${translatedText}`,
-          timestamp: Date.now()
-        }]);
+      const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
+
+      if (base64Audio) {
+        await playAudioBytes(base64Audio, true);
       }
-      setManualText('');
+
+      const entry: TranscriptionEntry = {
+        id: `manual-${Date.now()}`,
+        speaker: 'model',
+        inputText: originalText,
+        outputText: translatedText,
+        timestamp: Date.now(),
+        detectedLanguage: 'Manual'
+      };
+      setTranscriptions(prev => [...prev, entry]);
+      saveToHistory(entry);
     } catch (err) {
-      console.error(err);
-      setError('Translation or Speech failed. Check your API key and connection.');
+      console.error("Manual translation failed", err);
+      setError("Failed to translate text. Please try again.");
+      setManualText(originalText); 
     } finally {
-      setIsProcessingTTS(false);
+      setIsTranslating(false);
+    }
+  };
+
+  const handleReplay = async (text: string) => {
+    if (isReplaying) return;
+    try {
+      setIsReplaying(true);
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      // Use direct "Say: " prompt to satisfy the AudioOut model constraint
+      const response = await ai.models.generateContent({
+        model: TTS_MODEL,
+        contents: [{ parts: [{ text: `Say: ${text}` }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: 'Kore' },
+            },
+          },
+        },
+      });
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (base64Audio) {
+        await playAudioBytes(base64Audio, true);
+      } else {
+        setIsReplaying(false);
+      }
+    } catch (err) {
+      console.error("Replay failed", err);
+      setIsReplaying(false);
     }
   };
 
   const startSession = async () => {
     try {
       setError(null);
-      setDetectedLanguage('Detecting...');
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+      setDetectedLanguage(null);
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: { 
-          echoCancellation: true, 
-          noiseSuppression: true, 
-          autoGainControl: true,
-          channelCount: 1,
-          sampleRate: SAMPLE_RATE_IN
-        } 
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } 
       });
       streamRef.current = stream;
       
@@ -156,18 +222,13 @@ const App: React.FC = () => {
       analyserRef.current = audioContextInRef.current.createAnalyser();
       analyserRef.current.fftSize = 256;
 
-      const highPassFilter = audioContextInRef.current.createBiquadFilter();
-      highPassFilter.type = 'highpass';
-      highPassFilter.frequency.value = 100;
-
       const sessionPromise = ai.live.connect({
         model: LIVE_MODEL,
         callbacks: {
           onopen: () => {
             if (!audioContextInRef.current) return;
             const source = audioContextInRef.current.createMediaStreamSource(stream);
-            source.connect(highPassFilter);
-            highPassFilter.connect(analyserRef.current!);
+            source.connect(analyserRef.current!);
             
             const scriptProcessor = audioContextInRef.current.createScriptProcessor(INPUT_BUFFER_SIZE, 1, 1);
             scriptProcessor.onaudioprocess = (e) => {
@@ -178,14 +239,14 @@ const App: React.FC = () => {
               });
             };
 
-            highPassFilter.connect(scriptProcessor);
+            analyserRef.current!.connect(scriptProcessor);
             scriptProcessor.connect(audioContextInRef.current.destination);
             setIsListening(true);
             updateVisuals();
           },
           onmessage: async (message: LiveServerMessage) => {
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-            if (base64Audio) {
+            if (base64Audio && voiceEnabled) {
               await playAudioBytes(base64Audio);
             }
 
@@ -197,19 +258,23 @@ const App: React.FC = () => {
             }
 
             if (message.serverContent?.turnComplete) {
-              const inText = currentInputTranscription.current.trim();
               const outText = currentOutputTranscription.current.trim();
+              const langMatch = outText.match(/^\[(.*?)\]/);
+              let detected = langMatch ? langMatch[1] : undefined;
+              
+              if (detected) setDetectedLanguage(detected);
 
-              const langMatch = inText.match(/^\[(.*?)\]/);
-              if (langMatch) setDetectedLanguage(langMatch[1]);
-
-              if (inText || outText) {
-                setTranscriptions(prev => {
-                  const items: TranscriptionEntry[] = [...prev];
-                  if (inText) items.push({ id: `in-${Date.now()}-${Math.random()}`, speaker: 'user', text: inText, timestamp: Date.now() });
-                  if (outText) items.push({ id: `out-${Date.now()}-${Math.random()}`, speaker: 'model', text: outText, timestamp: Date.now() });
-                  return items;
-                });
+              if (currentInputTranscription.current.trim() || outText) {
+                const entry: TranscriptionEntry = {
+                   id: `entry-${Date.now()}-${Math.random()}`,
+                   speaker: 'model',
+                   inputText: currentInputTranscription.current.trim(),
+                   outputText: outText,
+                   timestamp: Date.now(),
+                   detectedLanguage: detected
+                };
+                setTranscriptions(prev => [...prev, entry]);
+                saveToHistory(entry);
               }
               currentInputTranscription.current = '';
               currentOutputTranscription.current = '';
@@ -231,18 +296,8 @@ const App: React.FC = () => {
           responseModalities: [Modality.AUDIO],
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          thinkingConfig: { thinkingBudget: 0 },
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
-          },
-          systemInstruction: `SYSTEM: Simultaneous Translator.
-          MISSION: Translate spoken audio into ${targetLang.name} (${targetLang.nativeName}) immediately.
-          
-          RULES:
-          1. Provide ONLY the translation as audio output.
-          2. Maintain high fidelity and phonetic accuracy.
-          3. Detect the source language automatically.
-          4. Output format: [Detected Language] Translation text.`
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
+          systemInstruction: `LingoShazam Mode: Identify source language, translate to ${targetLang.name}. Format transcription: "[Language] Translation". SPEAK translation immediately.`
         }
       });
 
@@ -255,111 +310,125 @@ const App: React.FC = () => {
   const toggleListening = () => isListening ? stopSession() : startSession();
 
   return (
-    <div className="flex flex-col h-screen max-w-2xl mx-auto overflow-hidden bg-black text-white">
-      <header className="pt-6 pb-2 px-6 flex flex-col items-center">
-        <div className="flex items-center gap-2 mb-1">
-          <div className={`w-2.5 h-2.5 rounded-full ${isListening ? 'bg-red-500 animate-pulse' : 'bg-gray-600'}`} />
-          <h1 className="text-2xl font-black tracking-widest text-white uppercase">
-            Linguist <span className="text-blue-500">Live</span>
-          </h1>
-        </div>
-        {isListening && (
-          <div className="bg-blue-500/20 text-blue-400 text-[9px] px-3 py-1 rounded-full font-black animate-fade-in border border-blue-500/30 tracking-widest uppercase">
-            Live High-Fidelity Path
-          </div>
-        )}
+    <div className="flex flex-col h-screen max-w-md mx-auto overflow-hidden bg-transparent text-white relative">
+      <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] h-[400px] bg-blue-500/10 blur-[100px] rounded-full transition-all duration-1000 ${isListening ? 'scale-150 opacity-50' : 'scale-100 opacity-20'}`} />
+      
+      <header className="pt-8 pb-4 px-6 z-10 flex items-center justify-between">
+        <h1 className="text-sm font-black tracking-[0.4em] uppercase opacity-60">LingoLive</h1>
+        <button 
+          onClick={() => setVoiceEnabled(!voiceEnabled)}
+          className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all ${voiceEnabled ? 'bg-blue-500/20 border-blue-500/40 text-blue-400 shadow-[0_0_10px_rgba(59,130,246,0.3)]' : 'bg-white/5 border-white/10 text-white/40'}`}
+        >
+          <i className={`fa-solid ${voiceEnabled ? 'fa-volume-high' : 'fa-volume-xmark'} mr-2`} />
+          {voiceEnabled ? 'Audio Out' : 'Muted'}
+        </button>
       </header>
 
-      <main className="flex-1 flex flex-col items-center justify-between px-6 pb-4 gap-4 overflow-hidden">
-        <div className="w-full bg-white/5 backdrop-blur-xl p-5 rounded-3xl flex flex-col gap-4 border border-white/10 shadow-2xl">
-          <LanguageSelector selectedLanguage={targetLang} onSelect={setTargetLang} disabled={isListening} />
-          
-          {isListening && (
-            <div className="flex justify-between items-center pt-3 border-t border-white/5">
-              <span className="text-[10px] text-gray-500 uppercase tracking-widest font-black">Source:</span>
-              <span className="text-xs text-blue-400 font-bold tracking-wide">{detectedLanguage || 'Listening...'}</span>
+      <main className="flex-1 flex flex-col items-center justify-between px-6 pb-6 z-10 overflow-hidden">
+        <div className="h-10 flex items-center justify-center">
+          {isListening && !detectedLanguage && (
+            <p className="text-xs font-bold tracking-widest text-blue-400 animate-pulse uppercase">Identifying...</p>
+          )}
+          {detectedLanguage && (
+            <div className="flex flex-col items-center animate-fade-in">
+              <span className="text-[10px] uppercase tracking-widest opacity-50 font-black mb-1">Live Match</span>
+              <p className="text-xl font-black text-blue-100 tracking-tight flex items-center gap-2">
+                <i className="fa-solid fa-bolt text-blue-400 text-sm" />
+                {detectedLanguage}
+              </p>
             </div>
           )}
         </div>
 
-        <div className="flex-[5] w-full bg-white/5 backdrop-blur-md rounded-3xl overflow-hidden flex flex-col shadow-inner border border-white/10 relative">
-          {error && (
-            <div className="absolute top-4 left-4 right-4 z-10 p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-[11px] font-bold text-center">
-              {error}
-            </div>
-          )}
-          <TranscriptionList entries={transcriptions} onReplay={handleManualTTS} />
-        </div>
-
-        {!isListening && (
-          <div className="w-full bg-white/5 p-4 rounded-3xl border border-white/10 flex flex-col gap-2 transition-all duration-500">
-            <div className="flex gap-2">
-              <input
-                type="text"
-                placeholder={`Translate into ${targetLang.name}...`}
-                value={manualText}
-                onChange={(e) => setManualText(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleManualTTS(manualText)}
-                className="flex-1 bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-600 transition-all"
-              />
-              <button
-                onClick={() => handleManualTTS(manualText)}
-                disabled={!manualText.trim() || isProcessingTTS}
-                className="bg-blue-600 hover:bg-blue-500 disabled:opacity-30 p-3 rounded-2xl transition-all shadow-lg flex items-center justify-center min-w-[3.5rem]"
-              >
-                {isProcessingTTS ? (
-                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                ) : (
-                  <i className="fa-solid fa-paper-plane text-white"></i>
-                )}
-              </button>
-            </div>
-          </div>
-        )}
-
-        <div className="relative flex flex-col items-center justify-center pt-2">
-          {isListening && (
-            <div 
-              className="absolute w-28 h-28 rounded-full border border-blue-500/30 transition-transform duration-75"
-              style={{ transform: `scale(${1 + (volume / 60)})`, opacity: 0.5 - (volume / 120) }}
+        <div className="w-full px-2 z-30">
+          <form onSubmit={handleManualTranslate} className="relative group">
+            <input 
+              type="text"
+              value={manualText}
+              onChange={(e) => setManualText(e.target.value)}
+              placeholder={isTranslating ? "Translating..." : "Type phrase to translate..."}
+              disabled={isTranslating}
+              className="w-full bg-white/5 border border-white/10 rounded-2xl py-3 px-5 pr-12 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all glass"
             />
+            <button 
+              type="submit"
+              disabled={!manualText.trim() || isTranslating}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-blue-400 hover:text-blue-300 disabled:opacity-30 transition-colors"
+            >
+              <i className={`fa-solid ${isTranslating ? 'fa-circle-notch fa-spin' : 'fa-paper-plane'}`} />
+            </button>
+          </form>
+        </div>
+
+        <div className="relative flex-1 w-full flex flex-col items-center justify-center py-2">
+          {isListening && (
+            <>
+              <div className="shazam-pulse" style={{ animationDuration: '3s' }} />
+              <div className="shazam-pulse" style={{ animationDuration: '2s', width: '220px', height: '220px' }} />
+              <div className="shazam-pulse" style={{ 
+                animationDuration: '1s', 
+                width: '160px', 
+                height: '160px', 
+                background: `rgba(59, 130, 246, ${Math.min(0.8, volume / 100)})` 
+              }} />
+            </>
           )}
           
           <button
             onClick={toggleListening}
-            className={`z-10 relative w-20 h-20 rounded-full flex items-center justify-center transition-all duration-300 ${
-              isListening 
-                ? 'bg-red-600 shadow-[0_0_60px_rgba(220,38,38,0.5)]' 
-                : 'bg-blue-600 hover:bg-blue-500 shadow-[0_0_50px_rgba(37,99,235,0.4)]'
+            className={`relative z-20 w-36 h-36 rounded-full flex items-center justify-center transition-all duration-500 glass group ${
+              isListening ? 'scale-110 border-blue-400/50' : 'hover:scale-105 border-white/10'
             }`}
+            style={{ 
+              boxShadow: isListening 
+                ? `0 0 ${20 + volume}px rgba(59, 130, 246, 0.6)` 
+                : '0 0 40px rgba(0,0,0,0.5)',
+              borderWidth: '4px'
+            }}
           >
-            {isListening ? (
-              <div className="flex gap-1 items-center h-6">
-                {[1, 2, 3, 4, 5].map(i => (
-                  <div 
-                    key={i} 
-                    className="w-1.5 bg-white rounded-full animate-bounce" 
-                    style={{ 
-                      height: `${30 + (volume * Math.random())}%`,
-                      animationDelay: `${i * 0.08}s`,
-                      animationDuration: '0.4s'
-                    }} 
-                  />
-                ))}
-              </div>
-            ) : (
-              <i className="fa-solid fa-microphone text-3xl text-white"></i>
-            )}
+            <div className={`absolute inset-0 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-600 opacity-0 group-hover:opacity-10 transition-opacity duration-500`} />
+            <div className="flex flex-col items-center">
+              <i className={`fa-solid ${isListening ? 'fa-stop text-2xl' : 'fa-microphone text-3xl'} text-white transition-all`} />
+            </div>
           </button>
           
-          <p className="mt-4 text-[11px] font-black tracking-[0.5em] text-gray-500 uppercase">
-            {isListening ? 'Streaming' : 'Tap for Live'}
-          </p>
+          <div className="mt-4 text-center h-6">
+            <p className="text-[9px] font-black tracking-[0.5em] text-white/30 uppercase">
+              {isListening ? 'Streaming Audio' : 'Ready to Translate'}
+            </p>
+          </div>
+        </div>
+
+        <div className="w-full space-y-4">
+          <div className="glass rounded-[2rem] p-5 border border-white/10">
+            <LanguageSelector selectedLanguage={targetLang} onSelect={setTargetLang} disabled={isListening} />
+          </div>
+
+          <div className="h-64 glass rounded-[2rem] overflow-hidden border border-white/10 relative">
+             <div className="absolute top-0 left-0 right-0 h-6 bg-gradient-to-b from-black/20 to-transparent pointer-events-none z-10" />
+             <TranscriptionList 
+               entries={transcriptions.length > 0 ? transcriptions : history} 
+               onReplay={handleReplay}
+             />
+             {isReplaying && (
+               <div className="absolute bottom-2 right-4 flex items-center gap-1.5 animate-pulse text-[8px] font-black text-blue-400 uppercase bg-blue-500/10 px-2 py-1 rounded-full border border-blue-500/20 shadow-xl">
+                 <div className="w-1 h-1 bg-blue-400 rounded-full animate-ping" />
+                 Synthesizing
+               </div>
+             )}
+          </div>
         </div>
       </main>
 
-      <footer className="p-3 text-center text-[10px] text-gray-700 font-black uppercase tracking-[0.3em] bg-black/80">
-        Audio: HD Stream • Real-time Build System Active
+      {error && (
+        <div className="absolute top-4 left-4 right-4 z-50 p-4 bg-red-500 text-white rounded-2xl text-xs font-bold text-center shadow-2xl animate-fade-in flex items-center justify-between">
+          <span>{error}</span>
+          <button onClick={() => setError(null)}><i className="fa-solid fa-times" /></button>
+        </div>
+      )}
+
+      <footer className="p-4 text-center text-[8px] text-white/10 font-black uppercase tracking-[0.4em] z-10">
+        LingoShazam V2.7 • {isListening ? 'Low Latency Mode' : 'Ready'}
       </footer>
     </div>
   );

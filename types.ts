@@ -1,4 +1,3 @@
-
 export interface Language {
   code: string;
   name: string;
@@ -8,7 +7,8 @@ export interface Language {
 export interface TranscriptionEntry {
   id: string;
   speaker: 'user' | 'model';
-  text: string;
+  inputText?: string;
+  outputText: string;
   timestamp: number;
   detectedLanguage?: string;
 }
@@ -20,7 +20,6 @@ export const SUPPORTED_LANGUAGES: Language[] = [
   { code: 'af', name: 'Afrikaans', nativeName: 'Afrikaans' },
   { code: 'st', name: 'Sotho', nativeName: 'Sesotho' },
   { code: 'sw', name: 'Swahili', nativeName: 'Kiswahili' },
-  { code: 'tn', name: 'Tswana', nativeName: 'Setswana' },
   { code: 'it', name: 'Italian', nativeName: 'Italiano' },
   { code: 'nl', name: 'Dutch', nativeName: 'Nederlands' },
   { code: 'es', name: 'Spanish', nativeName: 'Español' },

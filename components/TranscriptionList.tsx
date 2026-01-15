@@ -19,51 +19,54 @@ export const TranscriptionList: React.FC<TranscriptionListProps> = ({ entries, o
   return (
     <div 
       ref={scrollRef}
-      className="flex-1 w-full overflow-y-auto px-6 space-y-6 py-10 scroll-smooth custom-scrollbar"
+      className="h-full w-full overflow-y-auto px-6 py-4 space-y-5 scroll-smooth custom-scrollbar"
     >
       {entries.length === 0 && (
-        <div className="flex flex-col items-center justify-center h-full text-gray-600 space-y-6 opacity-40">
-          <div className="relative">
-             <div className="absolute -inset-4 bg-blue-500/10 rounded-full blur-xl animate-pulse" />
-             <svg className="w-16 h-16 relative" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-             </svg>
-          </div>
-          <p className="text-[10px] font-black tracking-[0.3em] uppercase">Listening for conversation...</p>
+        <div className="flex flex-col items-center justify-center h-full text-white/20">
+          <p className="text-[10px] font-black tracking-[0.2em] uppercase text-center">
+            No speech history<br/>captured yet
+          </p>
         </div>
       )}
       {entries.map((entry) => (
         <div
           key={entry.id}
-          className={`flex flex-col ${entry.speaker === 'user' ? 'items-end' : 'items-start'} animate-fade-in group`}
+          className="animate-fade-in group flex flex-col border-l-2 border-blue-500/20 pl-4 py-1 hover:border-blue-500/60 transition-colors"
         >
-          <div
-            className={`max-w-[85%] px-6 py-4 rounded-[2rem] text-sm leading-relaxed shadow-xl relative transition-all duration-300 ${
-              entry.speaker === 'user'
-                ? 'bg-blue-600 text-white rounded-tr-none'
-                : 'bg-white/5 text-gray-100 border border-white/10 rounded-tl-none backdrop-blur-xl hover:bg-white/10'
-            }`}
-          >
-            <div className="flex justify-between items-center mb-2">
-              <span className={`block text-[9px] uppercase font-black tracking-widest opacity-60 ${
-                entry.speaker === 'user' ? 'text-blue-100' : 'text-blue-400'
-              }`}>
-                {entry.speaker === 'user' ? 'Input' : 'Interpretation'}
-              </span>
-              {entry.speaker === 'model' && onReplay && (
-                <button 
-                  onClick={() => onReplay(entry.text.replace('[TTS Output]: ', ''))}
-                  className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:text-blue-400"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-                  </svg>
-                </button>
-              )}
+          <div className="flex items-center justify-between mb-2">
+             <div className="flex items-center gap-2">
+               <span className="bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded text-[8px] font-black tracking-widest uppercase border border-blue-500/30">
+                 {entry.detectedLanguage || 'Identified'}
+               </span>
+               <span className="text-[8px] text-white/20 font-mono">
+                 {new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+               </span>
+             </div>
+             {onReplay && entry.outputText && (
+               <button 
+                 onClick={() => onReplay(entry.outputText)}
+                 className="w-10 h-10 flex items-center justify-center bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 rounded-full text-blue-400 transition-all active:scale-90 shadow-sm"
+                 title="Replay translation"
+               >
+                 <i className="fa-solid fa-play text-sm ml-0.5" />
+               </button>
+             )}
+          </div>
+          
+          {entry.inputText && (
+            <div className="flex flex-col mb-2">
+              <span className="text-[7px] uppercase font-black tracking-widest text-white/20 mb-0.5">Original</span>
+              <p className="text-[10px] text-white/50 italic leading-tight">
+                "{entry.inputText.replace(/\[.*?\]/, '').trim()}"
+              </p>
             </div>
-            <div className="font-semibold whitespace-pre-wrap tracking-tight">
-              {entry.text}
-            </div>
+          )}
+          
+          <div className="flex flex-col">
+            <span className="text-[7px] uppercase font-black tracking-widest text-blue-400 mb-0.5">Translation</span>
+            <p className="text-xs font-bold text-white leading-relaxed">
+              {entry.outputText.replace(/\[.*?\]/, '').trim()}
+            </p>
           </div>
         </div>
       ))}
