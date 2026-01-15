@@ -9,7 +9,6 @@ import { TranscriptionList } from './components/TranscriptionList';
 const SAMPLE_RATE_IN = 16000;
 const SAMPLE_RATE_OUT = 24000;
 const MODEL_NAME = 'gemini-2.5-flash-native-audio-preview-12-2025';
-// Lower buffer size reduces input latency. 2048 is a good balance for most devices.
 const INPUT_BUFFER_SIZE = 2048;
 
 const App: React.FC = () => {
@@ -29,6 +28,7 @@ const App: React.FC = () => {
   const currentOutputTranscription = useRef('');
   const sessionRef = useRef<any>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   const updateVisuals = () => {
     if (analyserRef.current && isListening) {
@@ -44,6 +44,10 @@ const App: React.FC = () => {
     if (sessionRef.current) {
       try { sessionRef.current.close(); } catch (e) {}
       sessionRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
     }
     if (audioContextInRef.current) {
       audioContextInRef.current.close();
@@ -67,7 +71,18 @@ const App: React.FC = () => {
       setError(null);
       setDetectedLanguage('Detecting...');
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      // Enhanced microphone constraints for clarity
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: { 
+          echoCancellation: true, 
+          noiseSuppression: true, 
+          autoGainControl: true,
+          channelCount: 1,
+          sampleRate: SAMPLE_RATE_IN
+        } 
+      });
+      streamRef.current = stream;
       
       audioContextInRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: SAMPLE_RATE_IN });
       audioContextOutRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: SAMPLE_RATE_OUT });
@@ -75,15 +90,22 @@ const App: React.FC = () => {
       analyserRef.current = audioContextInRef.current.createAnalyser();
       analyserRef.current.fftSize = 256;
 
+      // Input filter chain: High-pass filter to remove low-frequency hum
+      const highPassFilter = audioContextInRef.current.createBiquadFilter();
+      highPassFilter.type = 'highpass';
+      highPassFilter.frequency.value = 100; // Remove sub-100Hz noise
+
       const sessionPromise = ai.live.connect({
         model: MODEL_NAME,
         callbacks: {
           onopen: () => {
             if (!audioContextInRef.current) return;
             const source = audioContextInRef.current.createMediaStreamSource(stream);
-            source.connect(analyserRef.current!);
             
-            // Reduced buffer size for lower latency
+            // Connect chain: source -> filter -> analyser & scriptProcessor
+            source.connect(highPassFilter);
+            highPassFilter.connect(analyserRef.current!);
+            
             const scriptProcessor = audioContextInRef.current.createScriptProcessor(INPUT_BUFFER_SIZE, 1, 1);
             scriptProcessor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
@@ -93,17 +115,15 @@ const App: React.FC = () => {
               });
             };
 
-            source.connect(scriptProcessor);
+            highPassFilter.connect(scriptProcessor);
             scriptProcessor.connect(audioContextInRef.current.destination);
             setIsListening(true);
             updateVisuals();
           },
           onmessage: async (message: LiveServerMessage) => {
-            // Audio Playback - Optimized for gapless streaming
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (base64Audio && audioContextOutRef.current) {
               const ctx = audioContextOutRef.current;
-              // Synchronize with current time to minimize lag while preventing overlap
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
               const audioBuffer = await decodeAudioData(decode(base64Audio), ctx, SAMPLE_RATE_OUT, 1);
               const source = ctx.createBufferSource();
@@ -115,7 +135,6 @@ const App: React.FC = () => {
               sourcesRef.current.add(source);
             }
 
-            // Transcription
             if (message.serverContent?.inputTranscription) {
               currentInputTranscription.current += message.serverContent.inputTranscription.text;
             }
@@ -149,7 +168,7 @@ const App: React.FC = () => {
             }
           },
           onerror: () => {
-            setError('Connection error.');
+            setError('Connection lost.');
             stopSession();
           },
           onclose: () => stopSession()
@@ -162,22 +181,16 @@ const App: React.FC = () => {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
           },
-          systemInstruction: `SYSTEM: ULTRA-LOW LATENCY SIMULTANEOUS INTERPRETER.
-          CORE MISSION: TRANSLATE SPEECH AS IT HAPPENS.
+          systemInstruction: `SYSTEM: HD-CLARITY SIMULTANEOUS INTERPRETER.
+          MISSION: TRANSLATE AUDIO WITH HIGH FIDELITY AND MINIMAL LAG.
           
-          LATENCY RULES:
-          1. DO NOT WAIT for the user to finish their sentence.
-          2. START INTERPRETING as soon as the first 3-5 words provide a clear phrase.
-          3. SPEAK CONTINUOUSLY. Stream audio output in real-time.
-          4. AUDIO OUTPUT MUST ONLY CONTAIN THE TRANSLATION.
-          5. NO PREAMBLE. NO FILLER. NO TALKING TO THE USER.
-          6. Target Language: ${targetLang.name} (${targetLang.code}).
-          
-          Linguistic context:
-          - Automatically detect the source language.
-          - Prepend detected language only to the text transcript: "[Language]: Text".
-          - Optimized for South African phonetics: Zulu, Xhosa, Afrikaans, Sotho, Tswana, Swahili.
-          - Optimized for European languages: Italian, Dutch, Spanish, French, German.`
+          PROCESSING RULES:
+          1. Use aggressive streaming translation (interpret as speech arrives).
+          2. AUDIO OUTPUT MUST BE CLEAN: Translated speech only.
+          3. NO REPETITION of input. NO FILLERS.
+          4. Target Language: ${targetLang.name} (${targetLang.code}).
+          5. Optimized for distinct phonetic clarity in South African and European languages.
+          6. Ignore background noise or overlapping conversation; focus on primary speaker.`
         }
       });
 
@@ -200,7 +213,7 @@ const App: React.FC = () => {
         </div>
         {isListening && (
           <div className="bg-blue-500/20 text-blue-400 text-[9px] px-2 py-0.5 rounded-full font-bold animate-fade-in border border-blue-500/30 tracking-tighter uppercase">
-            Aggressive Stream Active
+            High-Fidelity Stream
           </div>
         )}
       </header>
@@ -211,8 +224,8 @@ const App: React.FC = () => {
           
           {isListening && (
             <div className="flex justify-between items-center pt-2 border-t border-white/5">
-              <span className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">Live Context:</span>
-              <span className="text-xs text-blue-400 font-semibold">{detectedLanguage || 'Detecting...'}</span>
+              <span className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">Detected Source:</span>
+              <span className="text-xs text-blue-400 font-semibold">{detectedLanguage || 'Analyzing...'}</span>
             </div>
           )}
         </div>
@@ -226,7 +239,7 @@ const App: React.FC = () => {
           {isListening && (
             <div 
               className="absolute w-28 h-28 rounded-full border border-blue-500/30 transition-transform duration-75"
-              style={{ transform: `scale(${1 + (volume / 80)})`, opacity: 0.5 - (volume / 160) }}
+              style={{ transform: `scale(${1 + (volume / 70)})`, opacity: 0.5 - (volume / 140) }}
             />
           )}
           
@@ -247,7 +260,7 @@ const App: React.FC = () => {
                     style={{ 
                       height: `${25 + (volume * Math.random())}%`,
                       animationDelay: `${i * 0.08}s`,
-                      animationDuration: '0.5s'
+                      animationDuration: '0.4s'
                     }} 
                   />
                 ))}
@@ -260,13 +273,13 @@ const App: React.FC = () => {
           </button>
           
           <p className="mt-3 text-[10px] font-black tracking-[0.4em] text-gray-500 uppercase">
-            {isListening ? 'Interpreting' : 'Tap to Start'}
+            {isListening ? 'Interpreting' : 'Start Session'}
           </p>
         </div>
       </main>
 
       <footer className="p-2 text-center text-[9px] text-gray-700 font-bold uppercase tracking-[0.2em] bg-black/50">
-        Low Latency Audio Path • {INPUT_BUFFER_SIZE} Samples
+        Audio: HD Path • Echo Cancellation Active
       </footer>
     </div>
   );
