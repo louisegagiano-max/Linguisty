@@ -1,16 +1,25 @@
+
 export interface Language {
   code: string;
   name: string;
   nativeName: string;
 }
 
+export interface DiscoveryEntry {
+  id: string;
+  languageName: string;
+  snippet: string;
+  timestamp: number;
+  confidence: 'High' | 'Medium' | 'Low';
+}
+
+// Added TranscriptionEntry interface to fix the module export error in TranscriptionList.tsx
 export interface TranscriptionEntry {
   id: string;
-  speaker: 'user' | 'model';
-  inputText?: string;
-  outputText: string;
   timestamp: number;
   detectedLanguage?: string;
+  inputText?: string;
+  outputText: string;
 }
 
 export const SUPPORTED_LANGUAGES: Language[] = [
@@ -18,7 +27,6 @@ export const SUPPORTED_LANGUAGES: Language[] = [
   { code: 'zu', name: 'Zulu', nativeName: 'isiZulu' },
   { code: 'xh', name: 'Xhosa', nativeName: 'isiXhosa' },
   { code: 'af', name: 'Afrikaans', nativeName: 'Afrikaans' },
-  { code: 'st', name: 'Sotho', nativeName: 'Sesotho' },
   { code: 'sw', name: 'Swahili', nativeName: 'Kiswahili' },
   { code: 'it', name: 'Italian', nativeName: 'Italiano' },
   { code: 'nl', name: 'Dutch', nativeName: 'Nederlands' },
@@ -28,6 +36,4 @@ export const SUPPORTED_LANGUAGES: Language[] = [
   { code: 'ja', name: 'Japanese', nativeName: '日本語' },
   { code: 'ko', name: 'Korean', nativeName: '한국어' },
   { code: 'zh', name: 'Chinese', nativeName: '中文' },
-  { code: 'pt', name: 'Portuguese', nativeName: 'Português' },
-  { code: 'ru', name: 'Russian', nativeName: 'Русский' }
 ];
