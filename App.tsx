@@ -6,15 +6,6 @@ import { decode, decodeAudioData, createBlob } from './utils/audioUtils';
 import { LanguageSelector } from './components/LanguageSelector';
 import { TranscriptionList } from './components/TranscriptionList';
 
-// Platform-specific declarations for API Key selection
-// Fixed: Using the correct AIStudio interface name and allowing it to merge with existing declarations
-declare global {
-  interface AIStudio {
-    hasSelectedApiKey: () => Promise<boolean>;
-    openSelectKey: () => Promise<void>;
-  }
-}
-
 const SAMPLE_RATE_IN = 16000;
 const SAMPLE_RATE_OUT = 24000;
 const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
@@ -33,8 +24,6 @@ const App: React.FC = () => {
   const [isReplaying, setIsReplaying] = useState(false);
   const [manualText, setManualText] = useState('');
   const [isTranslating, setIsTranslating] = useState(false);
-  const [needsKeySelection, setNeedsKeySelection] = useState(false);
-  const [isInitializing, setIsInitializing] = useState(true);
 
   const audioContextInRef = useRef<AudioContext | null>(null);
   const audioContextOutRef = useRef<AudioContext | null>(null);
@@ -52,40 +41,12 @@ const App: React.FC = () => {
     return new AudioCtx({ sampleRate });
   }, []);
 
-  // Check for API key on mount
   useEffect(() => {
-    const checkApiKey = async () => {
-      // If process.env.API_KEY is missing or empty, we need the selection flow
-      const envKey = process.env.API_KEY;
-      if (!envKey || envKey === "") {
-        if (window.aistudio) {
-          const selected = await window.aistudio.hasSelectedApiKey();
-          if (!selected) {
-            setNeedsKeySelection(true);
-          }
-        } else {
-          // If not in AI Studio environment and no key, we can't do much but we'll try to proceed
-          console.warn("No API key found and window.aistudio missing.");
-        }
-      }
-      setIsInitializing(false);
-    };
-
-    checkApiKey();
-
     const saved = localStorage.getItem('linguisty-history-v3');
     if (saved) {
       try { setHistory(JSON.parse(saved)); } catch (e) { console.error("History load error", e); }
     }
   }, []);
-
-  const handleOpenKeySelector = async () => {
-    if (window.aistudio) {
-      await window.aistudio.openSelectKey();
-      // Assume selection successful as per guidelines to avoid race condition
-      setNeedsKeySelection(false);
-    }
-  };
 
   const unlockAudio = async () => {
     try {
@@ -93,8 +54,13 @@ const App: React.FC = () => {
         audioContextOutRef.current = getAudioContext(SAMPLE_RATE_OUT);
       }
       const ctx = audioContextOutRef.current;
-      if (ctx.state === 'suspended') await ctx.resume();
+      // Fixed: Cast ctx.state to any to bypass strict type narrowing that excludes platform-specific states like 'interrupted'
+      const currentState = ctx.state as any;
+      if (currentState === 'suspended' || currentState === 'interrupted') {
+        await ctx.resume();
+      }
       
+      // Mandatory silent play for iOS Safari audio unlock
       const buffer = ctx.createBuffer(1, 1, 22050);
       const source = ctx.createBufferSource();
       source.buffer = buffer;
@@ -186,8 +152,8 @@ const App: React.FC = () => {
       
       streamRef.current = stream;
       
-      // Always create a fresh instance to ensure the latest API Key from the selection dialog is used
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      // Initializing GoogleGenAI using process.env.API_KEY as the exclusive source for the key
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
       
       audioContextInRef.current = getAudioContext(SAMPLE_RATE_IN);
       if (audioContextInRef.current.state === 'suspended') await audioContextInRef.current.resume();
@@ -207,6 +173,7 @@ const App: React.FC = () => {
             scriptProcessor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
               const pcmBlob = createBlob(inputData);
+              // Send audio input only after session promise resolves to prevent race conditions
               sessionPromise.then(session => {
                 session.sendRealtimeInput({ media: pcmBlob });
               }).catch(() => {});
@@ -250,10 +217,7 @@ const App: React.FC = () => {
           },
           onerror: (e: any) => {
             console.error("Live API Error:", e);
-            if (e.message?.includes("Requested entity was not found")) {
-              setNeedsKeySelection(true);
-            }
-            setError('Connection failed. Please check your project settings.');
+            setError('Connection lost. Please try again.');
             stopSession();
           },
           onclose: () => stopSession()
@@ -262,7 +226,11 @@ const App: React.FC = () => {
           responseModalities: [Modality.AUDIO],
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          speechConfig: { voiceConfig: { voiceName: 'Kore' } },
+          speechConfig: { 
+            voiceConfig: { 
+              prebuiltVoiceConfig: { voiceName: 'Kore' } 
+            } 
+          },
           systemInstruction: `You are Linguisty, an instant polyglot translator. Identify the source language spoken and translate it fluently into ${targetLang.name}. Format output as: "[Source Language] Translated text"`
         }
       });
@@ -270,12 +238,7 @@ const App: React.FC = () => {
       sessionRef.current = await sessionPromise;
     } catch (err: any) {
       console.error("Session Start Error:", err);
-      if (err.message?.includes("API key must be set")) {
-        setNeedsKeySelection(true);
-        setError("Missing API Credentials. Please select a project.");
-      } else {
-        setError('Mic error: ' + (err.message || 'Check browser permissions.'));
-      }
+      setError('Mic error: ' + (err.message || 'Check permissions.'));
       stopSession();
     }
   };
@@ -291,20 +254,25 @@ const App: React.FC = () => {
     setError(null);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      // Using process.env.API_KEY directly for model operations
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
       const translationResponse = await ai.models.generateContent({
         model: TRANSLATE_MODEL,
         contents: `Translate the following text to ${targetLang.name}. Provide ONLY the translation: "${originalText}"`,
       });
       const translatedText = translationResponse.text?.trim() || "";
-      if (!translatedText) throw new Error("Empty translation");
+      if (!translatedText) throw new Error("Translation failed to return text.");
 
       const ttsResponse = await ai.models.generateContent({
         model: TTS_MODEL,
         contents: [{ parts: [{ text: `Say: ${translatedText}` }] }],
         config: {
           responseModalities: [Modality.AUDIO],
-          speechConfig: { voiceConfig: { voiceName: 'Kore' } },
+          speechConfig: { 
+            voiceConfig: { 
+              prebuiltVoiceConfig: { voiceName: 'Kore' } 
+            } 
+          },
         },
       });
 
@@ -323,7 +291,7 @@ const App: React.FC = () => {
       saveToHistory(entry);
     } catch (err: any) {
       console.error("Manual Translate Error:", err);
-      setError("Translation failed. Ensure API key is valid.");
+      setError("Translation failed. Please try again.");
       setManualText(originalText); 
     } finally {
       setIsTranslating(false);
@@ -335,54 +303,27 @@ const App: React.FC = () => {
     await unlockAudio();
     try {
       setIsReplaying(true);
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
       const response = await ai.models.generateContent({
         model: TTS_MODEL,
         contents: [{ parts: [{ text: `Say: ${text}` }] }],
         config: {
           responseModalities: [Modality.AUDIO],
-          speechConfig: { voiceConfig: { voiceName: 'Kore' } },
+          speechConfig: { 
+            voiceConfig: { 
+              prebuiltVoiceConfig: { voiceName: 'Kore' } 
+            } 
+          },
         },
       });
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (base64Audio) await playAudioBytes(base64Audio, true);
       else setIsReplaying(false);
-    } catch (err) { setIsReplaying(false); }
+    } catch (err) { 
+      console.error("Replay error:", err);
+      setIsReplaying(false); 
+    }
   };
-
-  if (isInitializing) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-      </div>
-    );
-  }
-
-  if (needsKeySelection) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full p-8 text-center bg-[#020617]">
-        <div className="shazam-pulse scale-150 opacity-20" />
-        <h1 className="text-2xl font-black uppercase tracking-[0.3em] mb-4 text-white">Linguisty</h1>
-        <p className="text-xs text-white/60 mb-8 max-w-xs leading-relaxed uppercase tracking-widest font-bold">
-          To use real-time translation, you must select a paid API project.
-        </p>
-        <button 
-          onClick={handleOpenKeySelector}
-          className="bg-blue-600 hover:bg-blue-500 px-8 py-4 rounded-full font-black text-[10px] uppercase tracking-[0.2em] shadow-2xl transition-all active:scale-95"
-        >
-          Connect API Project
-        </button>
-        <a 
-          href="https://ai.google.dev/gemini-api/docs/billing" 
-          target="_blank" 
-          rel="noopener noreferrer"
-          className="mt-6 text-[9px] text-white/30 uppercase tracking-widest hover:text-white/50 underline underline-offset-4"
-        >
-          Learn more about billing
-        </a>
-      </div>
-    );
-  }
 
   return (
     <div className="flex flex-col h-full max-w-md mx-auto overflow-hidden bg-transparent text-white relative">
@@ -500,7 +441,7 @@ const App: React.FC = () => {
       )}
 
       <footer className="p-4 text-center text-[7px] text-white/10 font-black uppercase tracking-[0.4em] z-10 shrink-0">
-        Linguisty V3.7 • Powered by Gemini Live • Mobile Ready
+        Linguisty V3.8 • Multi-Model Engine • Mobile Optimized
       </footer>
     </div>
   );
