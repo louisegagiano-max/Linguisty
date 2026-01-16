@@ -6,8 +6,7 @@ import { decode, decodeAudioData, createBlob } from './utils/audioUtils';
 import { LanguageSelector } from './components/LanguageSelector';
 import { TranscriptionList } from './components/TranscriptionList';
 
-// Environment variable access - using process.env.API_KEY as per guidelines
-const API_KEY = process.env.API_KEY;
+// Environment variable handling fixed: replaced import.meta.env with process.env.API_KEY as per guidelines.
 
 const SAMPLE_RATE_IN = 16000;
 const SAMPLE_RATE_OUT = 24000;
@@ -27,8 +26,6 @@ const App: React.FC = () => {
   const [isReplaying, setIsReplaying] = useState(false);
   const [manualText, setManualText] = useState('');
   const [isTranslating, setIsTranslating] = useState(false);
-  const [needsKey, setNeedsKey] = useState(!API_KEY);
-  const [isInitialized, setIsInitialized] = useState(!!API_KEY);
 
   const audioContextInRef = useRef<AudioContext | null>(null);
   const audioContextOutRef = useRef<AudioContext | null>(null);
@@ -46,17 +43,8 @@ const App: React.FC = () => {
     return new AudioCtx({ sampleRate });
   }, []);
 
+  // Updated useEffect: Removed API key initialization check as process.env.API_KEY is assumed to be present.
   useEffect(() => {
-    if (API_KEY) {
-      setIsInitialized(true);
-      setNeedsKey(false);
-      setError(null);
-    } else {
-      setNeedsKey(true);
-      setIsInitialized(false);
-      setError("API key missing. Ensure process.env.API_KEY is configured.");
-    }
-
     const saved = localStorage.getItem('linguisty-history-v4');
     if (saved) {
       try { setHistory(JSON.parse(saved)); } catch (e) { console.error("History load error", e); }
@@ -143,7 +131,6 @@ const App: React.FC = () => {
       };
       source.start(nextStartTimeRef.current);
       nextStartTimeRef.current += audioBuffer.duration;
-      // Fix: access .current on sourcesRef to call add()
       sourcesRef.current.add(source);
     } catch (e) {
       console.error("Playback error:", e);
@@ -152,12 +139,6 @@ const App: React.FC = () => {
   };
 
   const startSession = async () => {
-    const apiKey = API_KEY;
-    if (!apiKey) {
-      setNeedsKey(true);
-      return;
-    }
-
     await unlockAudio();
     
     try {
@@ -167,7 +148,8 @@ const App: React.FC = () => {
       });
       
       streamRef.current = stream;
-      const ai = new GoogleGenAI({ apiKey });
+      // Fixed: Initializing GoogleGenAI with process.env.API_KEY directly inside the call.
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
       audioContextInRef.current = getAudioContext(SAMPLE_RATE_IN);
       if (audioContextInRef.current.state === 'suspended') await audioContextInRef.current.resume();
@@ -256,12 +238,6 @@ const App: React.FC = () => {
     if (e) e.preventDefault();
     if (!manualText.trim() || isTranslating) return;
 
-    const apiKey = API_KEY;
-    if (!apiKey) {
-      setNeedsKey(true);
-      return;
-    }
-
     await unlockAudio();
     const originalText = manualText;
     setManualText('');
@@ -269,7 +245,8 @@ const App: React.FC = () => {
     setError(null);
 
     try {
-      const ai = new GoogleGenAI({ apiKey });
+      // Fixed: Initializing GoogleGenAI with process.env.API_KEY directly as per guidelines.
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const translationResponse = await ai.models.generateContent({
         model: TRANSLATE_MODEL,
         contents: `Translate to ${targetLang.name}. Return ONLY the translation. Text: "${originalText}"`,
@@ -282,7 +259,7 @@ const App: React.FC = () => {
         model: TTS_MODEL,
         contents: [{ parts: [{ text: translatedText }] }],
         config: {
-          responseModalalities: [Modality.AUDIO],
+          responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
         },
       });
@@ -312,17 +289,16 @@ const App: React.FC = () => {
   const handleReplay = async (text: string) => {
     if (isReplaying) return;
     await unlockAudio();
-    const apiKey = API_KEY;
-    if (!apiKey) return;
     
     try {
       setIsReplaying(true);
-      const ai = new GoogleGenAI({ apiKey });
+      // Fixed: Initializing GoogleGenAI with process.env.API_KEY directly inside the call.
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
         model: TTS_MODEL,
         contents: [{ parts: [{ text: text }] }],
         config: {
-          responseModalalities: [Modality.AUDIO],
+          responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
         },
       });
@@ -335,36 +311,7 @@ const App: React.FC = () => {
     }
   };
 
-  if (needsKey && !isInitialized) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full p-8 text-center bg-[#020617] relative overflow-hidden">
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[300px] h-[300px] bg-blue-500/10 blur-[80px] rounded-full" />
-        
-        <div className="glass p-8 rounded-[2.5rem] border border-white/10 relative z-10 max-w-sm w-full">
-          <div className="w-16 h-16 bg-blue-500/20 rounded-2xl flex items-center justify-center mb-6 mx-auto border border-blue-500/30">
-            <i className="fa-solid fa-triangle-exclamation text-yellow-400 text-2xl" />
-          </div>
-          <h2 className="text-xl font-black mb-4 tracking-tight">Setup Required</h2>
-          <p className="text-sm text-white/50 mb-8 leading-relaxed">
-            API key missing. Ensure <span className="text-blue-400 font-bold">process.env.API_KEY</span> is configured in the environment.
-          </p>
-          
-          <a 
-            href="https://ai.google.dev/gemini-api/docs/api-key" 
-            target="_blank" 
-            rel="noopener noreferrer"
-            className="block w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-4 rounded-2xl transition-all shadow-[0_0_30px_rgba(37,99,235,0.3)] active:scale-95 mb-6"
-          >
-            Get Gemini API Key
-          </a>
-          
-          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/30">
-            Deployment Status: Production Pending
-          </p>
-        </div>
-      </div>
-    );
-  }
+  // Fixed: Removed the conditional "API Key Required" UI as per guidelines.
 
   return (
     <div className="flex flex-col h-full max-w-md mx-auto overflow-hidden bg-transparent text-white relative">
