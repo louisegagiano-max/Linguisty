@@ -3,16 +3,15 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
-  base: './', // Ensures relative paths for assets, critical for GitHub Pages sub-repository hosting
+  base: './',
   define: {
-    // Injects the environment variable into the build
-    'process.env.API_KEY': JSON.stringify(process.env.API_KEY),
+    'process.env.API_KEY': JSON.stringify(process.env.API_KEY || ""),
   },
   build: {
     outDir: 'dist',
     assetsDir: 'assets',
     emptyOutDir: true,
     sourcemap: false,
-    minify: 'terser', // High quality minification
+    minify: 'terser',
   }
 });
