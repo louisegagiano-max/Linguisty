@@ -45,16 +45,23 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const checkKey = async () => {
-      // Check if process.env.API_KEY is missing and if a key has been selected via aistudio
-      if (!process.env.API_KEY) {
+      // Check for API key availability. If process.env.API_KEY is missing, try AI Studio selector.
+      const envKey = process.env.API_KEY;
+      if (!envKey || envKey === 'process.env.API_KEY') {
         try {
-          const hasKey = await window.aistudio.hasSelectedApiKey();
-          if (!hasKey) {
-            setKeySelectionNeeded(true);
+          // Robust check for window.aistudio
+          const aistudio = (window as any).aistudio;
+          if (aistudio && typeof aistudio.hasSelectedApiKey === 'function') {
+            const hasKey = await aistudio.hasSelectedApiKey();
+            if (!hasKey) {
+              setKeySelectionNeeded(true);
+            }
+          } else {
+            // If window.aistudio is not found, we might need to wait or it's not supported in this env
+            console.warn("AI Studio key manager not detected.");
           }
         } catch (e) {
-          // If aistudio is not present, assume injection will happen or show error
-          console.warn("AI Studio key manager not found, relying on process.env.API_KEY");
+          console.warn("Error checking AI Studio key manager:", e);
         }
       }
     };
@@ -68,12 +75,17 @@ const App: React.FC = () => {
 
   const handleOpenKeySelection = async () => {
     try {
-      await window.aistudio.openSelectKey();
-      // Assume selection was successful as per instructions
-      setKeySelectionNeeded(false);
-      setError(null);
+      const aistudio = (window as any).aistudio;
+      if (aistudio && typeof aistudio.openSelectKey === 'function') {
+        await aistudio.openSelectKey();
+        setKeySelectionNeeded(false);
+        setError(null);
+      } else {
+        setError("Key selection tool is unavailable in this environment.");
+      }
     } catch (e) {
       console.error("Key selection failed", e);
+      setError("Failed to open key selection dialog.");
     }
   };
 
@@ -170,6 +182,16 @@ const App: React.FC = () => {
       return;
     }
 
+    const apiKey = process.env.API_KEY;
+    if (!apiKey || apiKey === 'process.env.API_KEY') {
+      setError("API Key is missing. Please set it via environment variables or the key selector.");
+      // Try to fallback to key selector if available
+      if ((window as any).aistudio) {
+        setKeySelectionNeeded(true);
+      }
+      return;
+    }
+
     await unlockAudio();
     
     try {
@@ -179,7 +201,7 @@ const App: React.FC = () => {
       });
       
       streamRef.current = stream;
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey });
       
       audioContextInRef.current = getAudioContext(SAMPLE_RATE_IN);
       if (audioContextInRef.current.state === 'suspended') await audioContextInRef.current.resume();
@@ -231,7 +253,7 @@ const App: React.FC = () => {
                 saveToHistory(entry);
               }
               currentInputTranscription.current = '';
-              currentOutputTranscription = '';
+              currentOutputTranscription.current = ''; // Fixed: added .current
             }
 
             if (message.serverContent?.interrupted) {
@@ -242,18 +264,17 @@ const App: React.FC = () => {
           },
           onerror: (e: any) => {
             console.error("Live Error:", e);
-            if (e?.message?.includes('entity was not found')) {
+            if (e?.message?.includes('entity was not found') || e?.message?.includes('API Key')) {
               setKeySelectionNeeded(true);
-              setError("API Key invalid or not found. Please re-select.");
+              setError("API Key issue. Please re-select or check your environment configuration.");
             } else {
-              setError('Connection failed. Please ensure billing is enabled.');
+              setError('Connection failed. Please ensure billing is enabled for your project.');
             }
             stopSession();
           },
           onclose: () => stopSession()
         },
         config: {
-          /* Fixed typo: responseModalalities instead of responseModalities */
           responseModalities: [Modality.AUDIO],
           inputAudioTranscription: {},
           outputAudioTranscription: {},
@@ -283,6 +304,13 @@ const App: React.FC = () => {
       return;
     }
 
+    const apiKey = process.env.API_KEY;
+    if (!apiKey || apiKey === 'process.env.API_KEY') {
+       setError("API Key is missing.");
+       if ((window as any).aistudio) setKeySelectionNeeded(true);
+       return;
+    }
+
     await unlockAudio();
     const originalText = manualText;
     setManualText('');
@@ -290,7 +318,7 @@ const App: React.FC = () => {
     setError(null);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey });
       const translationResponse = await ai.models.generateContent({
         model: TRANSLATE_MODEL,
         contents: `Translate to ${targetLang.name}. Return ONLY the translation. Text: "${originalText}"`,
@@ -303,7 +331,6 @@ const App: React.FC = () => {
         model: TTS_MODEL,
         contents: [{ parts: [{ text: translatedText }] }],
         config: {
-          /* Fixed typo: responseModalities instead of responseModalities */
           responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
         },
@@ -335,14 +362,16 @@ const App: React.FC = () => {
     if (isReplaying) return;
     await unlockAudio();
     
+    const apiKey = process.env.API_KEY;
+    if (!apiKey || apiKey === 'process.env.API_KEY') return;
+
     try {
       setIsReplaying(true);
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey });
       const response = await ai.models.generateContent({
         model: TTS_MODEL,
         contents: [{ parts: [{ text: text }] }],
         config: {
-          /* Fixed typo: responseModalities instead of responseModalities */
           responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
         },
@@ -494,7 +523,7 @@ const App: React.FC = () => {
             </div>
             <h2 className="text-xl font-black mb-4 tracking-tight">API Key Required</h2>
             <p className="text-sm text-white/50 mb-8 leading-relaxed">
-              To use real-time translation on Netlify, you must select your Gemini API key from AI Studio.
+              To use real-time translation, you must select your Gemini API key from AI Studio.
             </p>
             <button 
               onClick={handleOpenKeySelection}
@@ -510,7 +539,7 @@ const App: React.FC = () => {
       )}
 
       <footer className="p-4 text-center text-[7px] text-white/10 font-black uppercase tracking-[0.4em] z-10 shrink-0">
-        Linguisty V5.0 • Netlify Optimized
+        Linguisty V5.1 • AI Studio Optimized
       </footer>
     </div>
   );
