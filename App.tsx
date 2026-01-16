@@ -141,6 +141,11 @@ const App: React.FC = () => {
   };
 
   const startSession = async () => {
+    if (!process.env.API_KEY) {
+      setError("API Key is missing. Please check your environment variables.");
+      return;
+    }
+
     await unlockAudio();
     
     try {
@@ -239,6 +244,11 @@ const App: React.FC = () => {
     if (e) e.preventDefault();
     if (!manualText.trim() || isTranslating) return;
 
+    if (!process.env.API_KEY) {
+      setError("API Key missing. Cannot translate.");
+      return;
+    }
+
     await unlockAudio();
     const originalText = manualText;
     setManualText('');
@@ -248,21 +258,25 @@ const App: React.FC = () => {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
-      // RUN IN PARALLEL for maximum speed
-      // 1. Get translation text for the UI
+      // RUN IN PARALLEL for maximum speed, but handle errors individually
       const textTranslationPromise = ai.models.generateContent({
         model: TRANSLATE_MODEL,
-        contents: `Translate the following to ${targetLang.name}. Output only the translation text, no quotes or notes: "${originalText}"`,
+        contents: [{ parts: [{ text: `Translate the following to ${targetLang.name}. Output only the translation text, no quotes or notes: "${originalText}"` }] }],
+      }).catch(err => {
+        console.error("Text Translation Part Failed:", err);
+        return null;
       });
 
-      // 2. Get audio translation in a single step (Translate + TTS in one go)
       const audioTranslationPromise = voiceEnabled ? ai.models.generateContent({
         model: TTS_MODEL,
-        contents: [{ parts: [{ text: `Translate the following to ${targetLang.name} and speak the translation clearly: "${originalText}"` }] }],
+        contents: [{ parts: [{ text: `Translate to ${targetLang.name} and speak clearly: "${originalText}"` }] }],
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
         },
+      }).catch(err => {
+        console.error("Audio Translation Part Failed:", err);
+        return null;
       }) : Promise.resolve(null);
 
       const [textResponse, audioResponse] = await Promise.all([
@@ -270,14 +284,16 @@ const App: React.FC = () => {
         audioTranslationPromise
       ]);
       
-      const translatedText = textResponse.text?.trim() || "Translation error.";
+      const translatedText = textResponse?.text?.trim() || "Translation failed (API limit or error).";
 
       // Play audio if available
       if (audioResponse) {
         const base64Audio = audioResponse.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
         if (base64Audio) await playAudioBytes(base64Audio, true);
-      } else {
-        setIsReplaying(false);
+      }
+
+      if (!textResponse && !audioResponse) {
+        throw new Error("Both translation and audio services failed.");
       }
 
       const entry: TranscriptionEntry = {
@@ -292,7 +308,7 @@ const App: React.FC = () => {
       saveToHistory(entry);
     } catch (err: any) {
       console.error("Manual Translate Error:", err);
-      setError("Translation failed. Check connectivity.");
+      setError("Translation failed. See console for details.");
       setManualText(originalText); 
     } finally {
       setIsTranslating(false);
@@ -300,7 +316,7 @@ const App: React.FC = () => {
   };
 
   const handleReplay = async (text: string) => {
-    if (isReplaying) return;
+    if (isReplaying || !process.env.API_KEY) return;
     await unlockAudio();
     
     try {
@@ -325,7 +341,6 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-full max-w-md mx-auto overflow-hidden bg-transparent text-white relative">
-      {/* Background Glow */}
       <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] h-[400px] bg-blue-500/10 blur-[100px] rounded-full transition-all duration-1000 ${isListening ? 'scale-150 opacity-50' : 'scale-100 opacity-20'}`} />
       
       <header className="pt-8 pb-2 px-6 z-10 flex items-center justify-between shrink-0">
@@ -342,7 +357,6 @@ const App: React.FC = () => {
       </header>
 
       <main className="flex-1 flex flex-col items-center px-6 pb-4 z-10 overflow-hidden">
-        {/* Connection Status */}
         <div className="h-8 flex items-center justify-center shrink-0">
           {isListening && (
             <div className="flex items-center gap-2">
@@ -352,7 +366,6 @@ const App: React.FC = () => {
           )}
         </div>
 
-        {/* Manual Input */}
         <div className="w-full px-2 z-30 mb-4 shrink-0">
           <form onSubmit={handleManualTranslate} className="relative group">
             <input 
@@ -374,7 +387,6 @@ const App: React.FC = () => {
           </form>
         </div>
 
-        {/* Shazam-style Central Mic */}
         <div className="relative shrink-0 w-full flex-1 flex flex-col items-center justify-center py-4">
           {isListening && (
             <>
@@ -413,7 +425,6 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Controls and History */}
         <div className="w-full flex-[1.8] flex flex-col min-h-0 space-y-3 mt-2">
           <div className="glass rounded-[2rem] p-4 border border-white/10 shrink-0">
             <LanguageSelector selectedLanguage={targetLang} onSelect={setTargetLang} disabled={isListening} />
@@ -445,7 +456,7 @@ const App: React.FC = () => {
       )}
 
       <footer className="p-4 text-center text-[7px] text-white/10 font-black uppercase tracking-[0.4em] z-10 shrink-0">
-        Linguisty V5.3 • Parallel Optimized
+        Linguisty V5.4 • Robust Sync
       </footer>
     </div>
   );
