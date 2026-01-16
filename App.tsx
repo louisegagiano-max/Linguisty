@@ -62,7 +62,6 @@ const App: React.FC = () => {
       if (ctx.state === 'suspended' || (ctx.state as string) === 'interrupted') {
         await ctx.resume();
       }
-      
       const buffer = ctx.createBuffer(1, 1, 22050);
       const source = ctx.createBufferSource();
       source.buffer = buffer;
@@ -141,13 +140,7 @@ const App: React.FC = () => {
   };
 
   const startSession = async () => {
-    if (!process.env.API_KEY) {
-      setError("API Key is missing. Please check your environment variables.");
-      return;
-    }
-
     await unlockAudio();
-    
     try {
       setError(null);
       const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -218,7 +211,7 @@ const App: React.FC = () => {
           },
           onerror: (e: any) => {
             console.error("Live Error:", e);
-            setError('Connection failed. Please ensure your environment is configured correctly.');
+            setError('Connection failed. Please check your network or API settings.');
             stopSession();
           },
           onclose: () => stopSession()
@@ -228,14 +221,14 @@ const App: React.FC = () => {
           inputAudioTranscription: {},
           outputAudioTranscription: {},
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
-          systemInstruction: `You are Linguisty. Detect the language and speak ONLY the translation to ${targetLang.name} instantly. No preamble.`
+          systemInstruction: `You are Linguisty. Translate any spoken audio to ${targetLang.name} and speak ONLY the translation immediately. No extra text.`
         }
       });
 
       sessionRef.current = await sessionPromise;
     } catch (err: any) {
       console.error("Start Error:", err);
-      setError('Setup Error: ' + (err.message || 'Check microphone permissions.'));
+      setError('Microphone access or API error. Please try again.');
       stopSession();
     }
   };
@@ -243,11 +236,6 @@ const App: React.FC = () => {
   const handleManualTranslate = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!manualText.trim() || isTranslating) return;
-
-    if (!process.env.API_KEY) {
-      setError("API Key missing. Cannot translate.");
-      return;
-    }
 
     await unlockAudio();
     const originalText = manualText;
@@ -258,25 +246,19 @@ const App: React.FC = () => {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
-      // RUN IN PARALLEL for maximum speed, but handle errors individually
+      // PARALLEL CALLS: Text translation for speed, and combined Translate+TTS for audio.
       const textTranslationPromise = ai.models.generateContent({
         model: TRANSLATE_MODEL,
-        contents: [{ parts: [{ text: `Translate the following to ${targetLang.name}. Output only the translation text, no quotes or notes: "${originalText}"` }] }],
-      }).catch(err => {
-        console.error("Text Translation Part Failed:", err);
-        return null;
+        contents: [{ parts: [{ text: `Translate to ${targetLang.name}. Provide only the translated text: "${originalText}"` }] }],
       });
 
       const audioTranslationPromise = voiceEnabled ? ai.models.generateContent({
         model: TTS_MODEL,
-        contents: [{ parts: [{ text: `Translate to ${targetLang.name} and speak clearly: "${originalText}"` }] }],
+        contents: [{ parts: [{ text: `Translate this text to ${targetLang.name} and read it aloud: "${originalText}"` }] }],
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
         },
-      }).catch(err => {
-        console.error("Audio Translation Part Failed:", err);
-        return null;
       }) : Promise.resolve(null);
 
       const [textResponse, audioResponse] = await Promise.all([
@@ -284,16 +266,11 @@ const App: React.FC = () => {
         audioTranslationPromise
       ]);
       
-      const translatedText = textResponse?.text?.trim() || "Translation failed (API limit or error).";
+      const translatedText = textResponse?.text?.trim() || "Translation unavailable.";
 
-      // Play audio if available
       if (audioResponse) {
         const base64Audio = audioResponse.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
         if (base64Audio) await playAudioBytes(base64Audio, true);
-      }
-
-      if (!textResponse && !audioResponse) {
-        throw new Error("Both translation and audio services failed.");
       }
 
       const entry: TranscriptionEntry = {
@@ -308,7 +285,7 @@ const App: React.FC = () => {
       saveToHistory(entry);
     } catch (err: any) {
       console.error("Manual Translate Error:", err);
-      setError("Translation failed. See console for details.");
+      setError("Translation failed. Please check your connectivity.");
       setManualText(originalText); 
     } finally {
       setIsTranslating(false);
@@ -316,9 +293,8 @@ const App: React.FC = () => {
   };
 
   const handleReplay = async (text: string) => {
-    if (isReplaying || !process.env.API_KEY) return;
+    if (isReplaying) return;
     await unlockAudio();
-    
     try {
       setIsReplaying(true);
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -361,7 +337,7 @@ const App: React.FC = () => {
           {isListening && (
             <div className="flex items-center gap-2">
                <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-ping" />
-               <p className="text-[10px] font-bold tracking-widest text-blue-400 uppercase">Live Translation</p>
+               <p className="text-[10px] font-bold tracking-widest text-blue-400 uppercase">Live Detection</p>
             </div>
           )}
         </div>
@@ -373,7 +349,7 @@ const App: React.FC = () => {
               value={manualText}
               onChange={(e) => setManualText(e.target.value)}
               onFocus={unlockAudio}
-              placeholder={isTranslating ? "Translating..." : "Type here to translate..."}
+              placeholder={isTranslating ? "Translating..." : "Type to translate..."}
               disabled={isTranslating}
               className="w-full bg-white/5 border border-white/10 rounded-2xl py-3 px-5 pr-12 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all glass"
             />
@@ -420,7 +396,7 @@ const App: React.FC = () => {
           
           <div className="mt-4 text-center h-4">
             <p className="text-[9px] font-black tracking-[0.5em] text-white/40 uppercase">
-              {isListening ? 'Detecting Speech' : 'Tap to Listen'}
+              {isListening ? 'Listening...' : 'Tap to Start'}
             </p>
           </div>
         </div>
@@ -439,7 +415,7 @@ const App: React.FC = () => {
              {isReplaying && (
                <div className="absolute bottom-4 right-6 flex items-center gap-1.5 animate-pulse text-[9px] font-black text-blue-400 uppercase bg-[#0f172a] px-3 py-1.5 rounded-full border border-blue-500/20 shadow-2xl z-20">
                  <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-ping" />
-                 Processing Audio
+                 Playing Audio
                </div>
              )}
           </div>
@@ -456,7 +432,7 @@ const App: React.FC = () => {
       )}
 
       <footer className="p-4 text-center text-[7px] text-white/10 font-black uppercase tracking-[0.4em] z-10 shrink-0">
-        Linguisty V5.4 • Robust Sync
+        Linguisty V5.5 • Direct Key Access
       </footer>
     </div>
   );
