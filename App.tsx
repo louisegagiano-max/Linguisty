@@ -10,7 +10,7 @@ const SAMPLE_RATE_OUT = 24000;
 const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
 const TTS_MODEL = 'gemini-2.5-flash-preview-tts';
 const TRANSLATE_MODEL = 'gemini-3-flash-preview';
-const INPUT_BUFFER_SIZE = 1024;
+const INPUT_BUFFER_SIZE = 2048;
 
 const App: React.FC = () => {
   const [isListening, setIsListening] = useState(false);
@@ -18,13 +18,13 @@ const App: React.FC = () => {
   const [targetLang, setTargetLang] = useState<Language>(SUPPORTED_LANGUAGES[0]);
   const [transcriptions, setTranscriptions] = useState<TranscriptionEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [detectedLanguage, setDetectedLanguage] = useState<string | null>(null);
   const [volume, setVolume] = useState(0);
   const [history, setHistory] = useState<TranscriptionEntry[]>([]);
   const [isReplaying, setIsReplaying] = useState(false);
   const [manualText, setManualText] = useState('');
   const [isTranslating, setIsTranslating] = useState(false);
   const [permissionStatus, setPermissionStatus] = useState<'prompt' | 'granted' | 'denied'>('prompt');
+  const [isAudioUnlocked, setIsAudioUnlocked] = useState(false);
 
   const audioContextInRef = useRef<AudioContext | null>(null);
   const audioContextOutRef = useRef<AudioContext | null>(null);
@@ -37,8 +37,35 @@ const App: React.FC = () => {
   const animationFrameRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
+  const getAudioContext = useCallback((sampleRate: number) => {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    return new AudioCtx({ sampleRate });
+  }, []);
+
+  // Explicitly unlock audio on mobile via a short dummy sound
+  const unlockAudio = async () => {
+    if (isAudioUnlocked) return;
+    try {
+      if (!audioContextOutRef.current) {
+        audioContextOutRef.current = getAudioContext(SAMPLE_RATE_OUT);
+      }
+      const ctx = audioContextOutRef.current;
+      if (ctx.state === 'suspended') await ctx.resume();
+      
+      const buffer = ctx.createBuffer(1, 1, 22050);
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.start(0);
+      setIsAudioUnlocked(true);
+      console.log("Audio unlocked for mobile");
+    } catch (e) {
+      console.error("Audio unlock failed", e);
+    }
+  };
+
   useEffect(() => {
-    const saved = localStorage.getItem('lingo-history-v3');
+    const saved = localStorage.getItem('linguisty-history-v2');
     if (saved) {
       try {
         setHistory(JSON.parse(saved));
@@ -47,23 +74,20 @@ const App: React.FC = () => {
       }
     }
 
-    // Checking permission status where supported (Chrome/Android)
     if (navigator.permissions && navigator.permissions.query) {
       navigator.permissions.query({ name: 'microphone' as any })
         .then((result) => {
           setPermissionStatus(result.state as any);
           result.onchange = () => setPermissionStatus(result.state as any);
         })
-        .catch(() => {
-          // Fallback for browsers that don't support mic query
-        });
+        .catch(() => {});
     }
   }, []);
 
   const saveToHistory = useCallback((entry: TranscriptionEntry) => {
     setHistory(prev => {
-      const updated = [entry, ...prev].slice(0, 20);
-      localStorage.setItem('lingo-history-v3', JSON.stringify(updated));
+      const updated = [entry, ...prev].slice(0, 25);
+      localStorage.setItem('linguisty-history-v2', JSON.stringify(updated));
       return updated;
     });
   }, []);
@@ -72,7 +96,7 @@ const App: React.FC = () => {
     if (analyserRef.current && isListening) {
       const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
       analyserRef.current.getByteFrequencyData(dataArray);
-      const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+      const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
       setVolume(average);
       animationFrameRef.current = requestAnimationFrame(updateVisuals);
     }
@@ -88,12 +112,11 @@ const App: React.FC = () => {
       streamRef.current = null;
     }
     if (audioContextInRef.current) {
-      audioContextInRef.current.close();
+      audioContextInRef.current.close().catch(() => {});
       audioContextInRef.current = null;
     }
     if (audioContextOutRef.current) {
-      audioContextOutRef.current.close();
-      audioContextOutRef.current = null;
+      audioContextOutRef.current.suspend().catch(() => {});
     }
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     
@@ -104,36 +127,38 @@ const App: React.FC = () => {
   }, []);
 
   const playAudioBytes = async (base64Audio: string, isManualReplay = false) => {
-    if (!audioContextOutRef.current) {
-      audioContextOutRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: SAMPLE_RATE_OUT });
+    try {
+      if (!audioContextOutRef.current) {
+        audioContextOutRef.current = getAudioContext(SAMPLE_RATE_OUT);
+      }
+      const ctx = audioContextOutRef.current;
+      if (ctx.state === 'suspended') await ctx.resume();
+      
+      nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
+      const decodedData = decode(base64Audio);
+      const audioBuffer = await decodeAudioData(decodedData, ctx, SAMPLE_RATE_OUT, 1);
+      
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
+      source.onended = () => {
+        sourcesRef.current.delete(source);
+        if (isManualReplay && sourcesRef.current.size === 0) setIsReplaying(false);
+      };
+      source.start(nextStartTimeRef.current);
+      nextStartTimeRef.current += audioBuffer.duration;
+      sourcesRef.current.add(source);
+    } catch (e) {
+      console.error("Audio playback error:", e);
+      if (isManualReplay) setIsReplaying(false);
     }
-    const ctx = audioContextOutRef.current;
-    if (ctx.state === 'suspended') await ctx.resume();
-    
-    nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-    const audioBuffer = await decodeAudioData(decode(base64Audio), ctx, SAMPLE_RATE_OUT, 1);
-    const source = ctx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(ctx.destination);
-    source.onended = () => {
-      sourcesRef.current.delete(source);
-      if (isManualReplay && sourcesRef.current.size === 0) setIsReplaying(false);
-    };
-    source.start(nextStartTimeRef.current);
-    nextStartTimeRef.current += audioBuffer.duration;
-    sourcesRef.current.add(source);
   };
 
   const startSession = async () => {
-    // Explicitly resume audio context for mobile safari
-    if (!audioContextOutRef.current) {
-      audioContextOutRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: SAMPLE_RATE_OUT });
-    }
-    if (audioContextOutRef.current.state === 'suspended') await audioContextOutRef.current.resume();
-
+    await unlockAudio();
+    
     try {
       setError(null);
-      setDetectedLanguage(null);
       
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: { 
@@ -148,8 +173,10 @@ const App: React.FC = () => {
       
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
-      audioContextInRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: SAMPLE_RATE_IN });
-      if (audioContextInRef.current.state === 'suspended') await audioContextInRef.current.resume();
+      audioContextInRef.current = getAudioContext(SAMPLE_RATE_IN);
+      if (audioContextInRef.current.state === 'suspended') {
+        await audioContextInRef.current.resume();
+      }
 
       analyserRef.current = audioContextInRef.current.createAnalyser();
       analyserRef.current.fftSize = 256;
@@ -185,14 +212,12 @@ const App: React.FC = () => {
             if (message.serverContent?.inputTranscription) {
               currentInputTranscription.current += message.serverContent.inputTranscription.text;
             }
-            
             if (message.serverContent?.outputTranscription) {
               currentOutputTranscription.current += message.serverContent.outputTranscription.text;
             }
 
             if (message.serverContent?.turnComplete) {
               const outText = currentOutputTranscription.current.trim();
-              
               if (currentInputTranscription.current.trim() || outText) {
                 const entry: TranscriptionEntry = {
                    id: `entry-${Date.now()}-${Math.random()}`,
@@ -217,7 +242,7 @@ const App: React.FC = () => {
           },
           onerror: (e) => {
             console.error("Live API Error:", e);
-            setError('Connection error. Retrying might help.');
+            setError('Connection issue. Tap to retry.');
             stopSession();
           },
           onclose: () => stopSession()
@@ -227,11 +252,7 @@ const App: React.FC = () => {
           inputAudioTranscription: {},
           outputAudioTranscription: {},
           speechConfig: { voiceConfig: { voiceName: 'Kore' } },
-          systemInstruction: `You are a professional instant translator. 
-          Your only task is to listen, identify the spoken language, and translate it immediately into ${targetLang.name}.
-          Do not include analysis or commentary.
-          FORMAT: Start your response with the source language in brackets, followed by the translation.
-          Example: "[Spanish] How are you?"`
+          systemInstruction: `You are Linguisty, a pro instant translator. Identify input language and translate to ${targetLang.name}. Format: "[Source Language] Translated text"`
         }
       });
 
@@ -239,11 +260,11 @@ const App: React.FC = () => {
     } catch (err: any) {
       console.error("Start Session Error:", err);
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setPermissionStatus('denied');
-        setError('Microphone permission was denied. Please allow access in browser settings.');
+        setError('Mic access denied. Please allow it in settings.');
       } else {
-        setError('Could not start microphone. Please ensure no other apps are using it.');
+        setError('Mic error: ' + (err.message || 'Busy or unavailable.'));
       }
+      stopSession();
     }
   };
 
@@ -253,11 +274,7 @@ const App: React.FC = () => {
     if (e) e.preventDefault();
     if (!manualText.trim() || isTranslating) return;
 
-    // Mobile: Resume audio context on first click
-    if (!audioContextOutRef.current) {
-      audioContextOutRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: SAMPLE_RATE_OUT });
-    }
-    if (audioContextOutRef.current.state === 'suspended') await audioContextOutRef.current.resume();
+    await unlockAudio();
 
     const originalText = manualText;
     setManualText('');
@@ -269,11 +286,11 @@ const App: React.FC = () => {
       
       const translationResponse = await ai.models.generateContent({
         model: TRANSLATE_MODEL,
-        contents: `Translate to ${targetLang.name}. Return only translation: "${originalText}"`,
+        contents: `Translate to ${targetLang.name}: "${originalText}". Provide ONLY the translated text.`,
       });
       const translatedText = translationResponse.text?.trim() || "";
       
-      if (!translatedText) throw new Error("Translation failed.");
+      if (!translatedText) throw new Error("Translation came back empty.");
 
       const ttsResponse = await ai.models.generateContent({
         model: TTS_MODEL,
@@ -285,10 +302,7 @@ const App: React.FC = () => {
       });
 
       const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
-
-      if (base64Audio) {
-        await playAudioBytes(base64Audio, true);
-      }
+      if (base64Audio) await playAudioBytes(base64Audio, true);
 
       const entry: TranscriptionEntry = {
         id: `manual-${Date.now()}`,
@@ -301,7 +315,8 @@ const App: React.FC = () => {
       setTranscriptions(prev => [...prev, entry]);
       saveToHistory(entry);
     } catch (err) {
-      setError("Translation failed.");
+      console.error("Manual translation error:", err);
+      setError("Translation failed. Check network.");
       setManualText(originalText); 
     } finally {
       setIsTranslating(false);
@@ -310,6 +325,7 @@ const App: React.FC = () => {
 
   const handleReplay = async (text: string) => {
     if (isReplaying) return;
+    await unlockAudio();
     try {
       setIsReplaying(true);
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -318,7 +334,7 @@ const App: React.FC = () => {
         contents: [{ parts: [{ text: `Say: ${text}` }] }],
         config: {
           responseModalities: [Modality.AUDIO],
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
+          speechConfig: { voiceConfig: { voiceName: 'Kore' } },
         },
       });
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
@@ -337,11 +353,11 @@ const App: React.FC = () => {
       <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] h-[400px] bg-blue-500/10 blur-[100px] rounded-full transition-all duration-1000 ${isListening ? 'scale-150 opacity-50' : 'scale-100 opacity-20'}`} />
       
       <header className="pt-8 pb-2 px-6 z-10 flex items-center justify-between shrink-0">
-        <h1 className="text-sm font-black tracking-[0.4em] uppercase opacity-60">LingoLive</h1>
+        <h1 className="text-sm font-black tracking-[0.4em] uppercase opacity-60">Linguisty</h1>
         <div className="flex items-center gap-2">
           {permissionStatus === 'denied' && (
             <span className="text-[9px] text-red-400 font-black uppercase tracking-widest bg-red-500/10 px-2 py-1 rounded border border-red-500/20">
-              Check Settings
+              Mic Blocked
             </span>
           )}
           <button 
@@ -349,7 +365,7 @@ const App: React.FC = () => {
             className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all ${voiceEnabled ? 'bg-blue-500/20 border-blue-500/40 text-blue-400 shadow-[0_0_10px_rgba(59,130,246,0.3)]' : 'bg-white/5 border-white/10 text-white/40'}`}
           >
             <i className={`fa-solid ${voiceEnabled ? 'fa-volume-high' : 'fa-volume-xmark'} mr-2`} />
-            {voiceEnabled ? 'Speaker On' : 'Muted'}
+            {voiceEnabled ? 'Audio On' : 'Muted'}
           </button>
         </div>
       </header>
@@ -370,7 +386,8 @@ const App: React.FC = () => {
               type="text"
               value={manualText}
               onChange={(e) => setManualText(e.target.value)}
-              placeholder={isTranslating ? "Processing..." : "Type to translate..."}
+              onFocus={unlockAudio}
+              placeholder={isTranslating ? "Translating..." : "Type text..."}
               disabled={isTranslating}
               className="w-full bg-white/5 border border-white/10 rounded-2xl py-3 px-5 pr-12 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all glass"
             />
@@ -418,7 +435,7 @@ const App: React.FC = () => {
           
           <div className="mt-4 text-center h-4">
             <p className="text-[9px] font-black tracking-[0.5em] text-white/40 uppercase">
-              {isListening ? 'Voice Active' : permissionStatus === 'denied' ? 'Mic Blocked' : 'Tap to Start'}
+              {isListening ? 'Active' : 'Tap to Start'}
             </p>
           </div>
         </div>
@@ -437,7 +454,7 @@ const App: React.FC = () => {
              {isReplaying && (
                <div className="absolute bottom-4 right-6 flex items-center gap-1.5 animate-pulse text-[9px] font-black text-blue-400 uppercase bg-[#0f172a] px-3 py-1.5 rounded-full border border-blue-500/20 shadow-2xl z-20">
                  <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-ping" />
-                 Playing
+                 Audio
                </div>
              )}
           </div>
@@ -454,7 +471,7 @@ const App: React.FC = () => {
       )}
 
       <footer className="p-4 text-center text-[7px] text-white/10 font-black uppercase tracking-[0.4em] z-10 shrink-0">
-        LingoLive V3.3 • Mobile Optimized • {isListening ? 'Streaming' : 'Standby'}
+        Linguisty V3.6 • Cross-Platform Mobile • {isListening ? 'Streaming' : 'Ready'}
       </footer>
     </div>
   );

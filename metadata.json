@@ -1,5 +1,5 @@
 {
-  "name": "Linguist Live",
+  "name": "Linguisty",
   "description": "A real-time polyglot translation app that detects languages automatically and provides instant spoken translations, with specialized support for South African languages like Zulu, Xhosa, and Afrikaans.",
   "requestFramePermissions": [
     "microphone"
