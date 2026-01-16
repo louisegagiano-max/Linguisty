@@ -18,6 +18,7 @@ interface ExtendedDiscoveryEntry extends DiscoveryEntry {
 }
 
 const App: React.FC = () => {
+  const [hasKey, setHasKey] = useState<boolean | null>(null);
   const [inputText, setInputText] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [targetLang, setTargetLang] = useState<Language>(SUPPORTED_LANGUAGES[0]);
@@ -40,6 +41,29 @@ const App: React.FC = () => {
   const audioSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const currentOutputTranscriptionRef = useRef<string>('');
 
+  // Check for API key on mount
+  useEffect(() => {
+    const checkKey = async () => {
+      // If process.env.API_KEY is already set, we might be good, 
+      // but let's check the studio selection state too
+      if (typeof (window as any).aistudio !== 'undefined') {
+        const selected = await (window as any).aistudio.hasSelectedApiKey();
+        setHasKey(selected || !!process.env.API_KEY);
+      } else {
+        setHasKey(!!process.env.API_KEY);
+      }
+    };
+    checkKey();
+  }, []);
+
+  const handleOpenKeyDialog = async () => {
+    if (typeof (window as any).aistudio !== 'undefined') {
+      await (window as any).aistudio.openSelectKey();
+      // Assume success as per instructions to avoid race conditions
+      setHasKey(true);
+    }
+  };
+
   const unlockAudio = useCallback(async () => {
     try {
       if (!audioContextOutRef.current) {
@@ -55,7 +79,7 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const saved = localStorage.getItem('linguisty_v8_history');
+    const saved = localStorage.getItem('linguisty_v9_history');
     if (saved) setHistory(JSON.parse(saved).slice(0, 10));
     
     const warmUp = () => unlockAudio();
@@ -79,29 +103,23 @@ const App: React.FC = () => {
   const playPcmData = async (base64Data: string) => {
     await unlockAudio();
     if (!audioContextOutRef.current) return;
-    
     const ctx = audioContextOutRef.current;
     setIsSpeaking(true);
-    
     try {
       const bytes = decode(base64Data);
       const audioBuffer = await decodeAudioData(bytes, ctx, SAMPLE_RATE_OUT, 1);
-      
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(ctx.destination);
-      
       source.onended = () => {
         audioSourcesRef.current.delete(source);
         if (audioSourcesRef.current.size === 0) setIsSpeaking(false);
       };
-
       nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
       source.start(nextStartTimeRef.current);
       nextStartTimeRef.current += audioBuffer.duration;
       audioSourcesRef.current.add(source);
     } catch (err) {
-      console.error("Playback error:", err);
       setIsSpeaking(false);
     }
   };
@@ -128,7 +146,6 @@ const App: React.FC = () => {
         setIsSpeaking(false);
       }
     } catch (e) {
-      console.error("TTS Error:", e);
       setIsSpeaking(false);
     }
   };
@@ -138,14 +155,12 @@ const App: React.FC = () => {
     setIsTranslating(true);
     setError(null);
     stopAllAudio();
-    
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
         model: CHAT_MODEL,
         contents: [{ parts: [{ text: `Translate this into ${targetLang.name}: "${inputText}"` }] }],
       });
-
       const translation = response.text?.trim() || "";
       if (translation) {
         const entry: ExtendedDiscoveryEntry = {
@@ -161,13 +176,16 @@ const App: React.FC = () => {
         setLastResult(entry);
         setHistory(prev => {
           const updated = [entry, ...prev].slice(0, 10);
-          localStorage.setItem('linguisty_v8_history', JSON.stringify(updated));
+          localStorage.setItem('linguisty_v9_history', JSON.stringify(updated));
           return updated;
         });
         setInputText('');
         await speakText(translation);
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (err.message?.includes("API Key")) {
+        setHasKey(false);
+      }
       setError("Translation failed.");
     } finally {
       setIsTranslating(false);
@@ -201,14 +219,8 @@ const App: React.FC = () => {
 
   const handleLiveMessage = async (message: LiveServerMessage) => {
     const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
-    if (base64Audio) {
-      await playPcmData(base64Audio);
-    }
-
-    if (message.serverContent?.outputTranscription) {
-      currentOutputTranscriptionRef.current += message.serverContent.outputTranscription.text;
-    }
-
+    if (base64Audio) { await playPcmData(base64Audio); }
+    if (message.serverContent?.outputTranscription) { currentOutputTranscriptionRef.current += message.serverContent.outputTranscription.text; }
     if (message.serverContent?.turnComplete) {
       const fullText = currentOutputTranscriptionRef.current;
       const match = fullText.match(/([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)/i);
@@ -226,16 +238,13 @@ const App: React.FC = () => {
         setLastResult(entry);
         setHistory(prev => {
           const updated = [entry, ...prev].slice(0, 10);
-          localStorage.setItem('linguisty_v8_history', JSON.stringify(updated));
+          localStorage.setItem('linguisty_v9_history', JSON.stringify(updated));
           return updated;
         });
       }
       currentOutputTranscriptionRef.current = '';
     }
-
-    if (message.serverContent?.interrupted) {
-      stopAllAudio();
-    }
+    if (message.serverContent?.interrupted) { stopAllAudio(); }
   };
 
   const startListening = async () => {
@@ -243,24 +252,18 @@ const App: React.FC = () => {
     stopAllAudio();
     setLastResult(null);
     await unlockAudio();
-    
     try {
-      // 1. Request microphone first - essential for mobile stability
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error("MediaDevices not supported in this browser.");
+        throw new Error("Microphone API not supported.");
       }
-
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
-
-      // 2. Initialize AudioContext after stream is acquired
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       const inputCtx = new AudioCtx({ sampleRate: SAMPLE_RATE_IN });
       audioContextInRef.current = inputCtx;
-      
       analyserRef.current = inputCtx.createAnalyser();
       analyserRef.current.fftSize = 64;
-
+      
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const sessionPromise = ai.live.connect({
         model: LIVE_MODEL,
@@ -269,25 +272,23 @@ const App: React.FC = () => {
             if (!audioContextInRef.current || !streamRef.current) return;
             const source = audioContextInRef.current.createMediaStreamSource(streamRef.current);
             const scriptProcessor = audioContextInRef.current.createScriptProcessor(4096, 1, 1);
-            
             scriptProcessor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
               const pcmBlob = createBlob(inputData);
-              sessionPromise.then(s => s.sendRealtimeInput({ media: pcmBlob })).catch(err => {
-                 console.error("Socket send error:", err);
-              });
+              sessionPromise.then(s => s.sendRealtimeInput({ media: pcmBlob })).catch(() => {});
             };
-            
             source.connect(analyserRef.current!);
             analyserRef.current!.connect(scriptProcessor);
             scriptProcessor.connect(audioContextInRef.current.destination);
-            
             setIsListening(true);
             updateVisuals();
           },
           onmessage: handleLiveMessage,
           onerror: (e) => {
-            setError("Connection failed. Check your network.");
+            if (e.message?.includes("API Key") || e.message?.includes("not found")) {
+               setHasKey(false);
+            }
+            setError("Connection error.");
             stopListening();
           },
           onclose: () => stopListening()
@@ -298,20 +299,48 @@ const App: React.FC = () => {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } },
           },
-          systemInstruction: `Identify the language spoken. Directly speak the translation in ${targetLang.name}. 
-          In your transcription output, use exactly this format: [Detected Language] | [Original Snippet] | [Translation into ${targetLang.name}].`
+          systemInstruction: `Identify language. Speak translation in ${targetLang.name}. Transcription format: [Detected Language] | [Snippet] | [Full Translation].`
         }
       });
       sessionRef.current = await sessionPromise;
     } catch (err: any) {
-      console.error("Mic start error:", err);
-      const msg = err.name === 'NotAllowedError' ? "Microphone access denied." : 
-                  err.name === 'NotFoundError' ? "No microphone found." :
-                  `Microphone error: ${err.message || "Unknown error"}`;
+      if (err.message?.includes("API Key")) {
+        setHasKey(false);
+      }
+      const msg = err.name === 'NotAllowedError' ? "Permission denied." : 
+                  err.message.includes("API Key") ? "API Key required." : 
+                  `Error: ${err.message}`;
       setError(msg);
       setIsListening(false);
     }
   };
+
+  if (hasKey === false) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-8 text-center bg-slate-950">
+        <div className="w-20 h-20 rounded-3xl bg-cyan-500/10 flex items-center justify-center text-cyan-400 mb-8 border border-cyan-500/20">
+          <i className="fa-solid fa-key text-3xl" />
+        </div>
+        <h2 className="text-2xl font-black text-white mb-4 uppercase tracking-widest">Setup Required</h2>
+        <p className="text-white/50 text-sm max-w-xs mb-8 leading-relaxed">
+          Linguisty requires a paid API key to perform real-time voice translation. Please select a key from a paid GCP project.
+        </p>
+        <button 
+          onClick={handleOpenKeyDialog}
+          className="w-full max-w-xs bg-cyan-500 hover:bg-cyan-400 text-white font-black py-4 rounded-2xl transition-all shadow-[0_0_30px_rgba(6,182,212,0.3)] mb-4 uppercase tracking-widest text-xs"
+        >
+          Connect API Key
+        </button>
+        <a 
+          href="https://ai.google.dev/gemini-api/docs/billing" 
+          target="_blank" 
+          className="text-[10px] text-white/30 hover:text-cyan-400 transition-colors uppercase font-bold tracking-widest"
+        >
+          View Billing Documentation
+        </a>
+      </div>
+    );
+  }
 
   return (
     <div className={`flex flex-col h-full overflow-hidden transition-all duration-1000 ${isListening ? 'listening bg-cyan-950/20' : ''}`}>
@@ -328,8 +357,6 @@ const App: React.FC = () => {
       </header>
 
       <main className="flex-1 overflow-y-auto custom-scrollbar px-6 py-4 flex flex-col gap-6 z-10">
-        
-        {/* Main Listening Button */}
         <section className="flex flex-col items-center py-4">
           <button
             onClick={isListening ? stopListening : startListening}
@@ -354,7 +381,6 @@ const App: React.FC = () => {
           </p>
         </section>
 
-        {/* Translation Bar */}
         <section className="w-full max-w-sm mx-auto">
            <div className="glass rounded-2xl p-1.5 border border-white/10 flex items-center gap-2 focus-within:border-cyan-500/50 transition-all shadow-xl">
               <div className="pl-4 text-white/20"><i className="fa-solid fa-keyboard text-xs" /></div>
@@ -376,7 +402,6 @@ const App: React.FC = () => {
            </div>
         </section>
 
-        {/* Live Result Area */}
         {lastResult && (
           <section className="w-full max-w-sm mx-auto animate-pop">
             <div className="glass rounded-[32px] p-6 border border-cyan-500/30 shadow-2xl relative">
@@ -402,7 +427,6 @@ const App: React.FC = () => {
           </section>
         )}
 
-        {/* History */}
         <section className="w-full max-w-sm mx-auto flex flex-col gap-3 pb-12">
           <div className="flex items-center justify-between px-2">
             <h3 className="text-[9px] font-black uppercase tracking-[0.3em] text-white/20">History</h3>
@@ -430,7 +454,6 @@ const App: React.FC = () => {
         </section>
       </main>
 
-      {/* Speaking State Overlay */}
       {isSpeaking && (
         <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50 animate-pop">
           <div className="bg-cyan-500 rounded-full px-5 py-2.5 shadow-2xl flex items-center gap-3">
