@@ -41,22 +41,26 @@ const App: React.FC = () => {
   const currentOutputTranscriptionRef = useRef<string>('');
 
   const unlockAudio = useCallback(async () => {
-    if (!audioContextOutRef.current) {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      audioContextOutRef.current = new AudioCtx({ sampleRate: SAMPLE_RATE_OUT });
-    }
-    if (audioContextOutRef.current.state === 'suspended') {
-      await audioContextOutRef.current.resume();
+    try {
+      if (!audioContextOutRef.current) {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        audioContextOutRef.current = new AudioCtx({ sampleRate: SAMPLE_RATE_OUT });
+      }
+      if (audioContextOutRef.current.state === 'suspended') {
+        await audioContextOutRef.current.resume();
+      }
+    } catch (e) {
+      console.warn("Could not unlock audio context:", e);
     }
   }, []);
 
   useEffect(() => {
-    const saved = localStorage.getItem('linguisty_v7_history');
+    const saved = localStorage.getItem('linguisty_v8_history');
     if (saved) setHistory(JSON.parse(saved).slice(0, 10));
     
     const warmUp = () => unlockAudio();
-    window.addEventListener('mousedown', warmUp);
-    window.addEventListener('touchstart', warmUp);
+    window.addEventListener('mousedown', warmUp, { once: false });
+    window.addEventListener('touchstart', warmUp, { once: false });
     return () => {
       window.removeEventListener('mousedown', warmUp);
       window.removeEventListener('touchstart', warmUp);
@@ -79,23 +83,27 @@ const App: React.FC = () => {
     const ctx = audioContextOutRef.current;
     setIsSpeaking(true);
     
-    const bytes = decode(base64Data);
-    const audioBuffer = await decodeAudioData(bytes, ctx, SAMPLE_RATE_OUT, 1);
-    
-    const source = ctx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(ctx.destination);
-    
-    source.onended = () => {
-      audioSourcesRef.current.delete(source);
-      if (audioSourcesRef.current.size === 0) setIsSpeaking(false);
-    };
+    try {
+      const bytes = decode(base64Data);
+      const audioBuffer = await decodeAudioData(bytes, ctx, SAMPLE_RATE_OUT, 1);
+      
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
+      
+      source.onended = () => {
+        audioSourcesRef.current.delete(source);
+        if (audioSourcesRef.current.size === 0) setIsSpeaking(false);
+      };
 
-    // Schedule playback
-    nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-    source.start(nextStartTimeRef.current);
-    nextStartTimeRef.current += audioBuffer.duration;
-    audioSourcesRef.current.add(source);
+      nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
+      source.start(nextStartTimeRef.current);
+      nextStartTimeRef.current += audioBuffer.duration;
+      audioSourcesRef.current.add(source);
+    } catch (err) {
+      console.error("Playback error:", err);
+      setIsSpeaking(false);
+    }
   };
 
   const speakText = async (text: string) => {
@@ -153,7 +161,7 @@ const App: React.FC = () => {
         setLastResult(entry);
         setHistory(prev => {
           const updated = [entry, ...prev].slice(0, 10);
-          localStorage.setItem('linguisty_v7_history', JSON.stringify(updated));
+          localStorage.setItem('linguisty_v8_history', JSON.stringify(updated));
           return updated;
         });
         setInputText('');
@@ -218,7 +226,7 @@ const App: React.FC = () => {
         setLastResult(entry);
         setHistory(prev => {
           const updated = [entry, ...prev].slice(0, 10);
-          localStorage.setItem('linguisty_v7_history', JSON.stringify(updated));
+          localStorage.setItem('linguisty_v8_history', JSON.stringify(updated));
           return updated;
         });
       }
@@ -237,12 +245,20 @@ const App: React.FC = () => {
     await unlockAudio();
     
     try {
+      // 1. Request microphone first - essential for mobile stability
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("MediaDevices not supported in this browser.");
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
+      // 2. Initialize AudioContext after stream is acquired
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      audioContextInRef.current = new AudioCtx({ sampleRate: SAMPLE_RATE_IN });
-      analyserRef.current = audioContextInRef.current.createAnalyser();
+      const inputCtx = new AudioCtx({ sampleRate: SAMPLE_RATE_IN });
+      audioContextInRef.current = inputCtx;
+      
+      analyserRef.current = inputCtx.createAnalyser();
       analyserRef.current.fftSize = 64;
 
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -257,7 +273,9 @@ const App: React.FC = () => {
             scriptProcessor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
               const pcmBlob = createBlob(inputData);
-              sessionPromise.then(s => s.sendRealtimeInput({ media: pcmBlob }));
+              sessionPromise.then(s => s.sendRealtimeInput({ media: pcmBlob })).catch(err => {
+                 console.error("Socket send error:", err);
+              });
             };
             
             source.connect(analyserRef.current!);
@@ -268,8 +286,8 @@ const App: React.FC = () => {
             updateVisuals();
           },
           onmessage: handleLiveMessage,
-          onerror: () => {
-            setError("Connection failed.");
+          onerror: (e) => {
+            setError("Connection failed. Check your network.");
             stopListening();
           },
           onclose: () => stopListening()
@@ -286,7 +304,11 @@ const App: React.FC = () => {
       });
       sessionRef.current = await sessionPromise;
     } catch (err: any) {
-      setError("Microphone required.");
+      console.error("Mic start error:", err);
+      const msg = err.name === 'NotAllowedError' ? "Microphone access denied." : 
+                  err.name === 'NotFoundError' ? "No microphone found." :
+                  `Microphone error: ${err.message || "Unknown error"}`;
+      setError(msg);
       setIsListening(false);
     }
   };
@@ -332,7 +354,7 @@ const App: React.FC = () => {
           </p>
         </section>
 
-        {/* Restore the Translation Bar */}
+        {/* Translation Bar */}
         <section className="w-full max-w-sm mx-auto">
            <div className="glass rounded-2xl p-1.5 border border-white/10 flex items-center gap-2 focus-within:border-cyan-500/50 transition-all shadow-xl">
               <div className="pl-4 text-white/20"><i className="fa-solid fa-keyboard text-xs" /></div>
@@ -341,7 +363,7 @@ const App: React.FC = () => {
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleManualTranslate()}
-                placeholder="Translate text instead..."
+                placeholder="Type to translate..."
                 className="flex-1 bg-transparent py-3 px-2 text-sm font-bold text-white placeholder:text-white/20 focus:outline-none"
               />
               <button 
@@ -424,8 +446,8 @@ const App: React.FC = () => {
 
       {error && (
         <div className="fixed bottom-6 left-6 right-6 z-50 p-4 backdrop-blur-2xl bg-red-500/90 rounded-2xl flex items-center justify-between shadow-2xl animate-pop">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-white">{error}</p>
-          <button onClick={() => setError(null)} className="text-white/80"><i className="fa-solid fa-xmark" /></button>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-white leading-tight">{error}</p>
+          <button onClick={() => setError(null)} className="text-white/80 shrink-0 ml-4"><i className="fa-solid fa-xmark" /></button>
         </div>
       )}
     </div>
