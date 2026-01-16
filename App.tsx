@@ -10,7 +10,7 @@ const SAMPLE_RATE_OUT = 24000;
 const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
 const TTS_MODEL = 'gemini-2.5-flash-preview-tts';
 const TRANSLATE_MODEL = 'gemini-3-flash-preview';
-const INPUT_BUFFER_SIZE = 2048;
+const INPUT_BUFFER_SIZE = 1024; // Lowered buffer for faster feedback
 
 const App: React.FC = () => {
   const [isListening, setIsListening] = useState(false);
@@ -123,16 +123,14 @@ const App: React.FC = () => {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
-      // Step 1: Use gemini-3-flash-preview for the translation logic
       const translationResponse = await ai.models.generateContent({
         model: TRANSLATE_MODEL,
-        contents: `Translate the following to ${targetLang.name}. Only return the translation, no explanation: "${originalText}"`,
+        contents: `Analyze this text for base language, accent, and vernacular (fernac). Then translate it to ${targetLang.name}: "${originalText}"`,
       });
       const translatedText = translationResponse.text?.trim() || "";
       
       if (!translatedText) throw new Error("Translation failed.");
 
-      // Step 2: Use gemini-2.5-flash-preview-tts for speech synthesis only
       const ttsResponse = await ai.models.generateContent({
         model: TTS_MODEL,
         contents: [{ 
@@ -162,7 +160,7 @@ const App: React.FC = () => {
         inputText: originalText,
         outputText: translatedText,
         timestamp: Date.now(),
-        detectedLanguage: 'Manual'
+        detectedLanguage: 'Manual Input'
       };
       setTranscriptions(prev => [...prev, entry]);
       saveToHistory(entry);
@@ -180,7 +178,6 @@ const App: React.FC = () => {
     try {
       setIsReplaying(true);
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      // Use direct "Say: " prompt to satisfy the AudioOut model constraint
       const response = await ai.models.generateContent({
         model: TTS_MODEL,
         contents: [{ parts: [{ text: `Say: ${text}` }] }],
@@ -253,8 +250,16 @@ const App: React.FC = () => {
             if (message.serverContent?.inputTranscription) {
               currentInputTranscription.current += message.serverContent.inputTranscription.text;
             }
+            
             if (message.serverContent?.outputTranscription) {
               currentOutputTranscription.current += message.serverContent.outputTranscription.text;
+              
+              // REAL-TIME EXTRACTION: Look for the [tag] as soon as it appears in the stream
+              const streamText = currentOutputTranscription.current.trim();
+              const langMatch = streamText.match(/^\[(.*?)\]/);
+              if (langMatch && langMatch[1]) {
+                setDetectedLanguage(langMatch[1]);
+              }
             }
 
             if (message.serverContent?.turnComplete) {
@@ -297,7 +302,24 @@ const App: React.FC = () => {
           inputAudioTranscription: {},
           outputAudioTranscription: {},
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
-          systemInstruction: `LingoShazam Mode: Identify source language, translate to ${targetLang.name}. Format transcription: "[Language] Translation". SPEAK translation immediately.`
+          systemInstruction: `INSTANT LINGUISTIC DETECTION PROTOCOL:
+          Act as a Forensic Linguist. Your priority is SPEED and ACCURACY.
+          
+          DIAGNOSTIC HIERARCHY (Follow strictly):
+          1. DETECT BASE LANGUAGE: Find the core grammar/syntax.
+          2. IDENTIFY ACCENT: Analyze phonetics and region.
+          3. ISOLATE VERNACULAR (FERNAC): Identify street-slang/local dialects.
+          
+          CRITICAL: Heavy vernacular often makes a language sound like another (e.g. Scouse sounds like Dutch to some, Patois sounds like West African languages). Do not be fooled. Look for the underlying base language first.
+          
+          RESPONSE FORMAT:
+          Begin EVERY response with the tag: "[Base Language (Accent) + Vernacular]".
+          Then provide the translation to ${targetLang.name}.
+          
+          Example: "[Dutch (Rotterdam) + Gabber Slang] Let's go to the party."
+          Example: "[English (Liverpool) + Scouse Vernacular] Are you alright?"
+          
+          Keep translations concise. EMIT THE TAG IMMEDIATELY for fast UI feedback.`
         }
       });
 
@@ -313,7 +335,7 @@ const App: React.FC = () => {
     <div className="flex flex-col h-screen max-w-md mx-auto overflow-hidden bg-transparent text-white relative">
       <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] h-[400px] bg-blue-500/10 blur-[100px] rounded-full transition-all duration-1000 ${isListening ? 'scale-150 opacity-50' : 'scale-100 opacity-20'}`} />
       
-      <header className="pt-8 pb-4 px-6 z-10 flex items-center justify-between">
+      <header className="pt-8 pb-2 px-6 z-10 flex items-center justify-between shrink-0">
         <h1 className="text-sm font-black tracking-[0.4em] uppercase opacity-60">LingoLive</h1>
         <button 
           onClick={() => setVoiceEnabled(!voiceEnabled)}
@@ -324,29 +346,32 @@ const App: React.FC = () => {
         </button>
       </header>
 
-      <main className="flex-1 flex flex-col items-center justify-between px-6 pb-6 z-10 overflow-hidden">
-        <div className="h-10 flex items-center justify-center">
+      <main className="flex-1 flex flex-col items-center px-6 pb-4 z-10 overflow-hidden">
+        <div className="h-8 flex items-center justify-center shrink-0">
           {isListening && !detectedLanguage && (
-            <p className="text-xs font-bold tracking-widest text-blue-400 animate-pulse uppercase">Identifying...</p>
+            <div className="flex items-center gap-2">
+               <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-ping" />
+               <p className="text-[10px] font-bold tracking-widest text-blue-400 uppercase">Profiling Speech...</p>
+            </div>
           )}
           {detectedLanguage && (
             <div className="flex flex-col items-center animate-fade-in">
-              <span className="text-[10px] uppercase tracking-widest opacity-50 font-black mb-1">Live Match</span>
-              <p className="text-xl font-black text-blue-100 tracking-tight flex items-center gap-2">
-                <i className="fa-solid fa-bolt text-blue-400 text-sm" />
+              <span className="text-[9px] uppercase tracking-widest opacity-50 font-black mb-0.5">Linguistic Profile</span>
+              <p className="text-sm font-black text-blue-100 tracking-tight flex items-center gap-2 text-center bg-blue-500/10 px-3 py-1 rounded-full border border-blue-500/20">
+                <i className="fa-solid fa-bolt text-blue-400 text-xs" />
                 {detectedLanguage}
               </p>
             </div>
           )}
         </div>
 
-        <div className="w-full px-2 z-30">
+        <div className="w-full px-2 z-30 mb-4 shrink-0">
           <form onSubmit={handleManualTranslate} className="relative group">
             <input 
               type="text"
               value={manualText}
               onChange={(e) => setManualText(e.target.value)}
-              placeholder={isTranslating ? "Translating..." : "Type phrase to translate..."}
+              placeholder={isTranslating ? "Deep Scanning..." : "Type text for forensic analysis..."}
               disabled={isTranslating}
               className="w-full bg-white/5 border border-white/10 rounded-2xl py-3 px-5 pr-12 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all glass"
             />
@@ -360,15 +385,15 @@ const App: React.FC = () => {
           </form>
         </div>
 
-        <div className="relative flex-1 w-full flex flex-col items-center justify-center py-2">
+        <div className="relative shrink-0 w-full flex flex-col items-center justify-center py-4">
           {isListening && (
             <>
               <div className="shazam-pulse" style={{ animationDuration: '3s' }} />
-              <div className="shazam-pulse" style={{ animationDuration: '2s', width: '220px', height: '220px' }} />
+              <div className="shazam-pulse" style={{ animationDuration: '2s', width: '180px', height: '180px' }} />
               <div className="shazam-pulse" style={{ 
                 animationDuration: '1s', 
-                width: '160px', 
-                height: '160px', 
+                width: '130px', 
+                height: '130px', 
                 background: `rgba(59, 130, 246, ${Math.min(0.8, volume / 100)})` 
               }} />
             </>
@@ -376,43 +401,43 @@ const App: React.FC = () => {
           
           <button
             onClick={toggleListening}
-            className={`relative z-20 w-36 h-36 rounded-full flex items-center justify-center transition-all duration-500 glass group ${
+            className={`relative z-20 w-32 h-32 rounded-full flex items-center justify-center transition-all duration-500 glass group ${
               isListening ? 'scale-110 border-blue-400/50' : 'hover:scale-105 border-white/10'
             }`}
             style={{ 
               boxShadow: isListening 
-                ? `0 0 ${20 + volume}px rgba(59, 130, 246, 0.6)` 
-                : '0 0 40px rgba(0,0,0,0.5)',
+                ? `0 0 ${15 + volume}px rgba(59, 130, 246, 0.6)` 
+                : '0 0 30px rgba(0,0,0,0.5)',
               borderWidth: '4px'
             }}
           >
             <div className={`absolute inset-0 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-600 opacity-0 group-hover:opacity-10 transition-opacity duration-500`} />
             <div className="flex flex-col items-center">
-              <i className={`fa-solid ${isListening ? 'fa-stop text-2xl' : 'fa-microphone text-3xl'} text-white transition-all`} />
+              <i className={`fa-solid ${isListening ? 'fa-stop text-xl' : 'fa-microphone text-2xl'} text-white transition-all`} />
             </div>
           </button>
           
-          <div className="mt-4 text-center h-6">
-            <p className="text-[9px] font-black tracking-[0.5em] text-white/30 uppercase">
-              {isListening ? 'Streaming Audio' : 'Ready to Translate'}
+          <div className="mt-2 text-center h-4">
+            <p className="text-[8px] font-black tracking-[0.5em] text-white/30 uppercase">
+              {isListening ? 'High Speed Analysis' : 'Ready to Identify'}
             </p>
           </div>
         </div>
 
-        <div className="w-full space-y-4">
-          <div className="glass rounded-[2rem] p-5 border border-white/10">
+        <div className="w-full flex-1 flex flex-col min-h-0 space-y-3 mt-2">
+          <div className="glass rounded-[2rem] p-4 border border-white/10 shrink-0">
             <LanguageSelector selectedLanguage={targetLang} onSelect={setTargetLang} disabled={isListening} />
           </div>
 
-          <div className="h-64 glass rounded-[2rem] overflow-hidden border border-white/10 relative">
-             <div className="absolute top-0 left-0 right-0 h-6 bg-gradient-to-b from-black/20 to-transparent pointer-events-none z-10" />
+          <div className="flex-1 glass rounded-[2rem] overflow-hidden border border-white/10 relative min-h-0">
+             <div className="absolute top-0 left-0 right-0 h-8 bg-gradient-to-b from-black/20 to-transparent pointer-events-none z-10" />
              <TranscriptionList 
                entries={transcriptions.length > 0 ? transcriptions : history} 
                onReplay={handleReplay}
              />
              {isReplaying && (
-               <div className="absolute bottom-2 right-4 flex items-center gap-1.5 animate-pulse text-[8px] font-black text-blue-400 uppercase bg-blue-500/10 px-2 py-1 rounded-full border border-blue-500/20 shadow-xl">
-                 <div className="w-1 h-1 bg-blue-400 rounded-full animate-ping" />
+               <div className="absolute bottom-4 right-6 flex items-center gap-1.5 animate-pulse text-[9px] font-black text-blue-400 uppercase bg-[#0f172a] px-3 py-1.5 rounded-full border border-blue-500/20 shadow-2xl z-20">
+                 <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-ping" />
                  Synthesizing
                </div>
              )}
@@ -427,8 +452,8 @@ const App: React.FC = () => {
         </div>
       )}
 
-      <footer className="p-4 text-center text-[8px] text-white/10 font-black uppercase tracking-[0.4em] z-10">
-        LingoShazam V2.7 • {isListening ? 'Low Latency Mode' : 'Ready'}
+      <footer className="p-3 text-center text-[7px] text-white/10 font-black uppercase tracking-[0.4em] z-10 shrink-0">
+        LingoShazam V3.0 • Optimized High Speed • {isListening ? 'Real-time Forensic Feed' : 'Ready'}
       </footer>
     </div>
   );
