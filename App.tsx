@@ -10,7 +10,7 @@ const SAMPLE_RATE_OUT = 24000;
 const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
 const TTS_MODEL = 'gemini-2.5-flash-preview-tts';
 const TRANSLATE_MODEL = 'gemini-3-flash-preview';
-const INPUT_BUFFER_SIZE = 1024; // Lowered buffer for faster feedback
+const INPUT_BUFFER_SIZE = 1024;
 
 const App: React.FC = () => {
   const [isListening, setIsListening] = useState(false);
@@ -24,6 +24,7 @@ const App: React.FC = () => {
   const [isReplaying, setIsReplaying] = useState(false);
   const [manualText, setManualText] = useState('');
   const [isTranslating, setIsTranslating] = useState(false);
+  const [permissionStatus, setPermissionStatus] = useState<PermissionState | 'prompt'>('prompt');
 
   const audioContextInRef = useRef<AudioContext | null>(null);
   const audioContextOutRef = useRef<AudioContext | null>(null);
@@ -44,6 +45,13 @@ const App: React.FC = () => {
       } catch (e) {
         console.error("Failed to load history", e);
       }
+    }
+
+    if (navigator.permissions && navigator.permissions.query) {
+      navigator.permissions.query({ name: 'microphone' as any }).then((result) => {
+        setPermissionStatus(result.state);
+        result.onchange = () => setPermissionStatus(result.state);
+      });
     }
   }, []);
 
@@ -125,7 +133,7 @@ const App: React.FC = () => {
       
       const translationResponse = await ai.models.generateContent({
         model: TRANSLATE_MODEL,
-        contents: `Analyze this text for base language, accent, and vernacular (fernac). Then translate it to ${targetLang.name}: "${originalText}"`,
+        contents: `Translate the following text to ${targetLang.name}. Do not provide any analysis, only the translated text: "${originalText}"`,
       });
       const translatedText = translationResponse.text?.trim() || "";
       
@@ -212,10 +220,14 @@ const App: React.FC = () => {
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } 
       });
       streamRef.current = stream;
+      setPermissionStatus('granted');
       
       audioContextInRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: SAMPLE_RATE_IN });
       audioContextOutRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: SAMPLE_RATE_OUT });
       
+      if (audioContextInRef.current.state === 'suspended') await audioContextInRef.current.resume();
+      if (audioContextOutRef.current.state === 'suspended') await audioContextOutRef.current.resume();
+
       analyserRef.current = audioContextInRef.current.createAnalyser();
       analyserRef.current.fftSize = 256;
 
@@ -253,22 +265,11 @@ const App: React.FC = () => {
             
             if (message.serverContent?.outputTranscription) {
               currentOutputTranscription.current += message.serverContent.outputTranscription.text;
-              
-              // REAL-TIME EXTRACTION: Look for the [tag] as soon as it appears in the stream
-              const streamText = currentOutputTranscription.current.trim();
-              const langMatch = streamText.match(/^\[(.*?)\]/);
-              if (langMatch && langMatch[1]) {
-                setDetectedLanguage(langMatch[1]);
-              }
             }
 
             if (message.serverContent?.turnComplete) {
               const outText = currentOutputTranscription.current.trim();
-              const langMatch = outText.match(/^\[(.*?)\]/);
-              let detected = langMatch ? langMatch[1] : undefined;
               
-              if (detected) setDetectedLanguage(detected);
-
               if (currentInputTranscription.current.trim() || outText) {
                 const entry: TranscriptionEntry = {
                    id: `entry-${Date.now()}-${Math.random()}`,
@@ -276,7 +277,7 @@ const App: React.FC = () => {
                    inputText: currentInputTranscription.current.trim(),
                    outputText: outText,
                    timestamp: Date.now(),
-                   detectedLanguage: detected
+                   detectedLanguage: 'Translated'
                 };
                 setTranscriptions(prev => [...prev, entry]);
                 saveToHistory(entry);
@@ -291,8 +292,9 @@ const App: React.FC = () => {
               nextStartTimeRef.current = 0;
             }
           },
-          onerror: () => {
-            setError('Connection lost.');
+          onerror: (e) => {
+            console.error("Live API Error:", e);
+            setError('Connection error. Please check your network.');
             stopSession();
           },
           onclose: () => stopSession()
@@ -302,65 +304,56 @@ const App: React.FC = () => {
           inputAudioTranscription: {},
           outputAudioTranscription: {},
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
-          systemInstruction: `INSTANT LINGUISTIC DETECTION PROTOCOL:
-          Act as a Forensic Linguist. Your priority is SPEED and ACCURACY.
-          
-          DIAGNOSTIC HIERARCHY (Follow strictly):
-          1. DETECT BASE LANGUAGE: Find the core grammar/syntax.
-          2. IDENTIFY ACCENT: Analyze phonetics and region.
-          3. ISOLATE VERNACULAR (FERNAC): Identify street-slang/local dialects.
-          
-          CRITICAL: Heavy vernacular often makes a language sound like another (e.g. Scouse sounds like Dutch to some, Patois sounds like West African languages). Do not be fooled. Look for the underlying base language first.
-          
-          RESPONSE FORMAT:
-          Begin EVERY response with the tag: "[Base Language (Accent) + Vernacular]".
-          Then provide the translation to ${targetLang.name}.
-          
-          Example: "[Dutch (Rotterdam) + Gabber Slang] Let's go to the party."
-          Example: "[English (Liverpool) + Scouse Vernacular] Are you alright?"
-          
-          Keep translations concise. EMIT THE TAG IMMEDIATELY for fast UI feedback.`
+          systemInstruction: `You are a professional translator. 
+          Your only task is to listen to the user, identify the language being spoken, and translate it accurately into ${targetLang.name}.
+          Do not include any analysis, descriptions, or tags.
+          Provide ONLY the translated text as the output.
+          Identify the source language and format the output as: "[Source Language Name] Translated text"`
         }
       });
 
       sessionRef.current = await sessionPromise;
-    } catch (err) {
-      setError('Microphone access denied or connection failed.');
+    } catch (err: any) {
+      console.error("Start Session Error:", err);
+      if (err.name === 'NotAllowedError') {
+        setPermissionStatus('denied');
+        setError('Microphone access denied. Please enable it in your browser settings.');
+      } else {
+        setError('Could not access microphone. Ensure no other app is using it.');
+      }
     }
   };
 
   const toggleListening = () => isListening ? stopSession() : startSession();
 
   return (
-    <div className="flex flex-col h-screen max-w-md mx-auto overflow-hidden bg-transparent text-white relative">
+    <div className="flex flex-col h-full max-w-md mx-auto overflow-hidden bg-transparent text-white relative">
       <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] h-[400px] bg-blue-500/10 blur-[100px] rounded-full transition-all duration-1000 ${isListening ? 'scale-150 opacity-50' : 'scale-100 opacity-20'}`} />
       
       <header className="pt-8 pb-2 px-6 z-10 flex items-center justify-between shrink-0">
         <h1 className="text-sm font-black tracking-[0.4em] uppercase opacity-60">LingoLive</h1>
-        <button 
-          onClick={() => setVoiceEnabled(!voiceEnabled)}
-          className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all ${voiceEnabled ? 'bg-blue-500/20 border-blue-500/40 text-blue-400 shadow-[0_0_10px_rgba(59,130,246,0.3)]' : 'bg-white/5 border-white/10 text-white/40'}`}
-        >
-          <i className={`fa-solid ${voiceEnabled ? 'fa-volume-high' : 'fa-volume-xmark'} mr-2`} />
-          {voiceEnabled ? 'Audio Out' : 'Muted'}
-        </button>
+        <div className="flex items-center gap-2">
+          {permissionStatus === 'denied' && (
+            <span className="text-[10px] text-red-400 font-black uppercase tracking-widest bg-red-500/10 px-2 py-1 rounded border border-red-500/20">
+              Mic Denied
+            </span>
+          )}
+          <button 
+            onClick={() => setVoiceEnabled(!voiceEnabled)}
+            className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all ${voiceEnabled ? 'bg-blue-500/20 border-blue-500/40 text-blue-400 shadow-[0_0_10px_rgba(59,130,246,0.3)]' : 'bg-white/5 border-white/10 text-white/40'}`}
+          >
+            <i className={`fa-solid ${voiceEnabled ? 'fa-volume-high' : 'fa-volume-xmark'} mr-2`} />
+            {voiceEnabled ? 'Audio Out' : 'Muted'}
+          </button>
+        </div>
       </header>
 
       <main className="flex-1 flex flex-col items-center px-6 pb-4 z-10 overflow-hidden">
         <div className="h-8 flex items-center justify-center shrink-0">
-          {isListening && !detectedLanguage && (
+          {isListening && (
             <div className="flex items-center gap-2">
                <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-ping" />
-               <p className="text-[10px] font-bold tracking-widest text-blue-400 uppercase">Profiling Speech...</p>
-            </div>
-          )}
-          {detectedLanguage && (
-            <div className="flex flex-col items-center animate-fade-in">
-              <span className="text-[9px] uppercase tracking-widest opacity-50 font-black mb-0.5">Linguistic Profile</span>
-              <p className="text-sm font-black text-blue-100 tracking-tight flex items-center gap-2 text-center bg-blue-500/10 px-3 py-1 rounded-full border border-blue-500/20">
-                <i className="fa-solid fa-bolt text-blue-400 text-xs" />
-                {detectedLanguage}
-              </p>
+               <p className="text-[10px] font-bold tracking-widest text-blue-400 uppercase">Translating Speech...</p>
             </div>
           )}
         </div>
@@ -371,7 +364,7 @@ const App: React.FC = () => {
               type="text"
               value={manualText}
               onChange={(e) => setManualText(e.target.value)}
-              placeholder={isTranslating ? "Deep Scanning..." : "Type text for forensic analysis..."}
+              placeholder={isTranslating ? "Translating..." : "Type text to translate..."}
               disabled={isTranslating}
               className="w-full bg-white/5 border border-white/10 rounded-2xl py-3 px-5 pr-12 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all glass"
             />
@@ -385,7 +378,7 @@ const App: React.FC = () => {
           </form>
         </div>
 
-        <div className="relative shrink-0 w-full flex flex-col items-center justify-center py-4">
+        <div className="relative shrink-0 w-full flex-1 flex flex-col items-center justify-center py-4">
           {isListening && (
             <>
               <div className="shazam-pulse" style={{ animationDuration: '3s' }} />
@@ -419,12 +412,12 @@ const App: React.FC = () => {
           
           <div className="mt-2 text-center h-4">
             <p className="text-[8px] font-black tracking-[0.5em] text-white/30 uppercase">
-              {isListening ? 'High Speed Analysis' : 'Ready to Identify'}
+              {isListening ? 'Translation Active' : permissionStatus === 'denied' ? 'Permission Denied' : 'Ready to Translate'}
             </p>
           </div>
         </div>
 
-        <div className="w-full flex-1 flex flex-col min-h-0 space-y-3 mt-2">
+        <div className="w-full flex-[1.5] flex flex-col min-h-0 space-y-3 mt-2">
           <div className="glass rounded-[2rem] p-4 border border-white/10 shrink-0">
             <LanguageSelector selectedLanguage={targetLang} onSelect={setTargetLang} disabled={isListening} />
           </div>
@@ -453,7 +446,7 @@ const App: React.FC = () => {
       )}
 
       <footer className="p-3 text-center text-[7px] text-white/10 font-black uppercase tracking-[0.4em] z-10 shrink-0">
-        LingoShazam V3.0 • Optimized High Speed • {isListening ? 'Real-time Forensic Feed' : 'Ready'}
+        LingoShazam V3.2 • Translation Mode • {isListening ? 'Listening' : 'Ready'}
       </footer>
     </div>
   );

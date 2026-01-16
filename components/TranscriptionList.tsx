@@ -1,4 +1,3 @@
-
 import React, { useEffect, useRef } from 'react';
 import { TranscriptionEntry } from '../types';
 
@@ -24,7 +23,7 @@ export const TranscriptionList: React.FC<TranscriptionListProps> = ({ entries, o
       {entries.length === 0 && (
         <div className="flex flex-col items-center justify-center h-full text-white/20">
           <p className="text-[10px] font-black tracking-[0.2em] uppercase text-center">
-            No speech history<br/>captured yet
+            No translation history<br/>captured yet
           </p>
         </div>
       )}
@@ -36,7 +35,7 @@ export const TranscriptionList: React.FC<TranscriptionListProps> = ({ entries, o
           <div className="flex items-center justify-between mb-2">
              <div className="flex items-center gap-2">
                <span className="bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded text-[8px] font-black tracking-widest uppercase border border-blue-500/30">
-                 {entry.detectedLanguage || 'Identified'}
+                 {entry.detectedLanguage || 'Translation'}
                </span>
                <span className="text-[8px] text-white/20 font-mono">
                  {new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
@@ -57,7 +56,7 @@ export const TranscriptionList: React.FC<TranscriptionListProps> = ({ entries, o
             <div className="flex flex-col mb-2">
               <span className="text-[7px] uppercase font-black tracking-widest text-white/20 mb-0.5">Original</span>
               <p className="text-[10px] text-white/50 italic leading-tight">
-                "{entry.inputText.replace(/\[.*?\]/, '').trim()}"
+                "{entry.inputText.trim()}"
               </p>
             </div>
           )}
@@ -65,7 +64,7 @@ export const TranscriptionList: React.FC<TranscriptionListProps> = ({ entries, o
           <div className="flex flex-col">
             <span className="text-[7px] uppercase font-black tracking-widest text-blue-400 mb-0.5">Translation</span>
             <p className="text-xs font-bold text-white leading-relaxed">
-              {entry.outputText.replace(/\[.*?\]/, '').trim()}
+              {entry.outputText.trim()}
             </p>
           </div>
         </div>
